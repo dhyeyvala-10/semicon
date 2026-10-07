@@ -1,0 +1,34 @@
+{
+  "name": "semicon-fab-twin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local-first interactive 3D digital twin of semiconductor manufacturing — from quartz to computer.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@react-three/drei": "10.7.9",
+    "@react-three/fiber": "9.8.1",
+    "maath": "0.10.8",
+    "next": "16.4.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "three": "0.186.1",
+    "topojson-client": "3.1.0",
+    "world-atlas": "2.0.2",
+    "zustand": "5.0.15"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/three": "0.186.0",
+    "@types/topojson-client": "3.1.5",
+    "typescript": "5.9.3"
+  }
+}

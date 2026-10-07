@@ -1,0 +1,110 @@
+'use client';
+/**
+ * Scene management (§123, §124): each major scene is a separate dynamically imported
+ * module. Only the active scene is mounted; the next scene in the journey is
+ * prefetched while the current one plays.
+ */
+import { Suspense, lazy, useEffect, useRef, type ComponentType } from 'react';
+import { useFrame } from '@react-three/fiber';
+import type { SceneId, Stage } from '@/types';
+import { useUI } from '@/lib/store';
+import { STAGE_BY_ID, JOURNEY } from '@/data/process';
+import { engine } from '@/simulation/engine';
+import { tracked } from '@/lib/runtime';
+
+export interface SceneProps {
+  stage: Stage;
+}
+
+type Loader = () => Promise<{ default: ComponentType<SceneProps> }>;
+
+export const SCENE_LOADERS: Record<SceneId, Loader> = {
+  fab: () => import('./scenes/FabScene'),
+  materials: () => import('./scenes/MaterialsScene'),
+  crystal: () => import('./scenes/CrystalScene'),
+  ingot: () => import('./scenes/IngotScene'),
+  finishing: () => import('./scenes/FinishingScene'),
+  robot: () => import('./scenes/RobotScene'),
+  thermal: () => import('./scenes/ThermalScene'),
+  deposition: () => import('./scenes/DepositionScene'),
+  track: () => import('./scenes/TrackScene'),
+  lithography: () => import('./scenes/LithographyScene'),
+  etch: () => import('./scenes/EtchScene'),
+  implant: () => import('./scenes/ImplantScene'),
+  cmp: () => import('./scenes/CMPScene'),
+  cycle: () => import('./scenes/CycleScene'),
+  transistor: () => import('./scenes/TransistorScene'),
+  interconnect: () => import('./scenes/InterconnectScene'),
+  metrology: () => import('./scenes/MetrologyScene'),
+  inspection: () => import('./scenes/InspectionScene'),
+  probe: () => import('./scenes/ProbeScene'),
+  dicing: () => import('./scenes/DicingScene'),
+  packaging: () => import('./scenes/PackagingScene'),
+  finaltest: () => import('./scenes/FinalTestScene'),
+  shipping: () => import('./scenes/ShippingScene'),
+  globe: () => import('./scenes/GlobeScene'),
+  supplychain: () => import('./scenes/SupplyChainScene'),
+  controlroom: () => import('./scenes/ControlRoomScene'),
+  utilities: () => import('./scenes/UtilitiesScene'),
+  system: () => import('./scenes/SystemScene'),
+  scale: () => import('./scenes/ScaleScene'),
+};
+
+const LAZY = Object.fromEntries(Object.entries(SCENE_LOADERS).map(([k, l]) => [k, lazy(l)])) as unknown as Record<SceneId, ComponentType<SceneProps>>;
+
+const prefetched = new Set<string>();
+export function prefetchScene(id: SceneId) {
+  if (prefetched.has(id)) return;
+  prefetched.add(id);
+  SCENE_LOADERS[id]().catch(() => prefetched.delete(id));
+}
+
+/** Marks loader steps and ends the transition once the first frame of a scene renders. */
+function SceneReady({ id }: { id: string }) {
+  const frames = useRef(0);
+  const done = useRef(false);
+  useFrame(() => {
+    if (done.current) return;
+    frames.current++;
+    if (frames.current === 3) {
+      done.current = true;
+      const s = useUI.getState();
+      s.markSceneLoaded(id);
+      s.setLoader('models', 'done');
+      s.setLoader('materials', 'done');
+      if (s.transition.active) setTimeout(() => useUI.getState().set({ transition: { ...useUI.getState().transition, active: false } }), 250);
+    }
+  });
+  return null;
+}
+
+export function SceneSwitcher() {
+  const stageId = useUI((s) => s.stageId);
+  const stage = STAGE_BY_ID[stageId];
+  const Scene = LAZY[stage.scene];
+
+  useEffect(() => {
+    useUI.getState().setLoader('models', useUI.getState().loadedScenes.includes(stage.scene) ? 'done' : 'loading');
+    // tracked positions are re-published every frame by the active scene
+    tracked.clear();
+  }, [stage.scene]);
+
+  // prefetch the next journey scene once this stage is underway
+  useEffect(() => {
+    const id = setInterval(() => {
+      const i = JOURNEY.findIndex((s) => s.id === engine.stage.id);
+      const next = JOURNEY[i + 1];
+      if (next && next.scene !== stage.scene && engine.player.view.stageT > 0.3) prefetchScene(next.scene);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [stage.scene]);
+
+  return (
+    <Suspense fallback={null}>
+      <group key={stage.scene}>
+        <Scene stage={stage} />
+        <SceneReady id={stage.scene} />
+      </group>
+    </Suspense>
+  );
+}
