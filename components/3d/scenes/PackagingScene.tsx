@@ -649,7 +649,7 @@ export default function PackagingScene({ stage }: SceneProps) {
   }, []);
   return (
     <>
-      <Lighting env="assembly" shadowExtent={6} />
+      <Lighting env="assembly" shadowExtent={6} fogScale={3} />
       {/* ESD bench mat (1 unit = 1 cm) */}
       <mesh rotation-x={-Math.PI / 2} position={[0, -0.001, 0]} receiveShadow>
         <planeGeometry args={[90, 90]} />

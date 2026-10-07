@@ -1980,3 +1980,17 @@ a {
   height: 20px;
   font-size: 10px;
 }
+.globe-cats {
+  max-width: 230px;
+}
+.globe-cats .chain {
+  margin-top: 6px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+.globe-cats .chain .dim {
+  color: var(--text-3);
+  margin-top: 4px;
+}

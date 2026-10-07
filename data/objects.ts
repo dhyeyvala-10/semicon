@@ -65,6 +65,7 @@ export const OBJECTS: Record<string, ObjectInfo> = {
   'lot-foup': { title: 'FOUP (followed lot)', category: 'Material handling', description: 'The carrier holding LOT-A0731, including wafer WF-000184.' },
 
   /* utilities */
+  'fab-building': { title: 'Main fab building', category: 'Utilities', description: 'Several stacked levels: the sub-fab with pumps, abatement and distribution; the cleanroom on a waffle slab; and the return-air plenum with fan filter units above. Proportions here are illustrative.' },
   'u-electricity': { title: 'Electrical distribution', category: 'Utilities', description: 'Substation, switchgear, UPS and busways power tools, HVAC and pumps.', kind: 'CONCEPTUAL' },
   'u-water': { title: 'Ultrapure water', category: 'Utilities', description: 'Multi-stage treatment (filtration, reverse osmosis, ion exchange, UV, degassing) feeds a recirculating UPW loop.', kind: 'CONCEPTUAL' },
   'u-air': { title: 'Air handling', category: 'Utilities', description: 'Make-up air units condition fresh air; FFUs recirculate cleanroom air through filters.', kind: 'CONCEPTUAL' },

@@ -389,7 +389,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     mpu: 1,
     environment: 'office',
     views: ['normal'],
-    presets: { factory: P([0, 1.7, 5.6], [0, 1.9, -2]), data: P([0, 2.1, 2.2], [0, 2.1, -3]) },
+    presets: { factory: P([0, 2.7, 6.4], [0, 2.2, -3]), data: P([0, 2.3, 2.2], [0, 2.3, -3.6]) },
   },
   utilities: {
     id: 'utilities',
@@ -398,7 +398,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     mpu: 1,
     environment: 'exterior',
     views: ['normal', 'xray'],
-    presets: { factory: P([95, 60, 110], [0, 8, 0], undefined, 40), machine: P([40, 16, 46], [0, 6, 0]), internal: P([20, 6, 22], [0, 3, 0]) },
+    presets: { factory: P([135, 85, 160], [0, 6, 0], undefined, 40), machine: P([62, 26, 70], [0, 8, 0]), internal: P([20, 9, 26], [0, 6, 0]) },
   },
   system: {
     id: 'system',
@@ -407,7 +407,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     mpu: 0.01,
     environment: 'office',
     views: ['normal', 'exploded'],
-    presets: { factory: P([0, 30, 60], [0, 8, 0]), machine: P([22, 22, 30], [0, 2, 0]), wafer: P([7, 7, 9], [0, 0.5, 0]), transistor: P([2.4, 2.4, 3], [0, 0.2, 0]) },
+    presets: { factory: P([62, 34, 40], [0, 16, 0]), machine: P([22, 22, 30], [0, 2, 0]), wafer: P([7, 7, 9], [0, 0.5, 0]), transistor: P([2.4, 2.4, 3], [0, 0.2, 0]) },
   },
   scale: {
     id: 'scale',

@@ -25,10 +25,10 @@ const ENV: Record<Env, { bg: string; fog: [number, number] | null; hemi: [string
   warehouse: { bg: '#0c0c0b', fog: [26, 80], hemi: ['#e9e2d4', '#2a2824', 0.42], key: ['#fff1d8', 1.1], amb: 0.07 },
   void: { bg: '#07090b', fog: null, hemi: ['#d4dccf', '#141814', 0.5], key: ['#ffffff', 1.35], amb: 0.12 },
   office: { bg: '#07090b', fog: [12, 40], hemi: ['#b9c4cc', '#15181b', 0.35], key: ['#e8eef2', 0.6], amb: 0.08 },
-  exterior: { bg: '#1a2129', fog: [180, 520], hemi: ['#b7c6d3', '#2b2d2c', 0.8], key: ['#fff1dc', 1.8], amb: 0.15 },
+  exterior: { bg: '#1a211c', fog: [200, 560], hemi: ['#c9d6c3', '#2b2d2a', 0.75], key: ['#fff1dc', 1.7], amb: 0.14 },
 };
 
-export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0] }: { env: Env; shadowExtent?: number; center?: [number, number, number] }) {
+export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0], fogScale = 1 }: { env: Env; shadowExtent?: number; center?: [number, number, number]; /** multiply fog distances (scenes in cm use 100) */ fogScale?: number }) {
   const e = ENV[env];
   const quality = useUI((s) => s.quality);
   const scene = useThree((s) => s.scene);
@@ -36,8 +36,8 @@ export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0] }: { env: 
   const base = useMemo(() => ({ bg: new THREE.Color(e.bg), sky: new THREE.Color(e.hemi[0]) }), [e]);
   useEffect(() => {
     scene.background = new THREE.Color(e.bg);
-    scene.fog = e.fog ? new THREE.Fog(e.bg, e.fog[0], e.fog[1]) : null;
-  }, [scene, e]);
+    scene.fog = e.fog ? new THREE.Fog(e.bg, e.fog[0] * fogScale, e.fog[1] * fogScale) : null;
+  }, [scene, e, fogScale]);
   // journey colour grade: tint the atmosphere (background, fog, sky light) — subtly, physics stays neutral
   const last = useRef(-1);
   useFrame(() => {
