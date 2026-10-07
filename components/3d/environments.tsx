@@ -23,7 +23,7 @@ const ENV: Record<Env, { bg: string; fog: [number, number] | null; hemi: [string
   hall: { bg: '#0b0c0b', fog: [20, 70], hemi: ['#d8d6cf', '#24262a', 0.4], key: ['#fff2dd', 1.15], amb: 0.06 },
   assembly: { bg: '#0b0d0c', fog: [14, 48], hemi: ['#e8ece6', '#2b2f2c', 0.45], key: ['#ffffff', 1.1], amb: 0.07 },
   warehouse: { bg: '#0c0c0b', fog: [26, 80], hemi: ['#e9e2d4', '#2a2824', 0.42], key: ['#fff1d8', 1.1], amb: 0.07 },
-  void: { bg: '#07090b', fog: null, hemi: ['#cfd8e0', '#14181c', 0.6], key: ['#ffffff', 1.6], amb: 0.15 },
+  void: { bg: '#07090b', fog: null, hemi: ['#d4dccf', '#141814', 0.5], key: ['#ffffff', 1.35], amb: 0.12 },
   office: { bg: '#07090b', fog: [12, 40], hemi: ['#b9c4cc', '#15181b', 0.35], key: ['#e8eef2', 0.6], amb: 0.08 },
   exterior: { bg: '#1a2129', fog: [180, 520], hemi: ['#b7c6d3', '#2b2d2c', 0.8], key: ['#fff1dc', 1.8], amb: 0.15 },
 };
@@ -70,7 +70,7 @@ export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0] }: { env: 
         shadow-camera-far={60}
       />
       <directionalLight position={[-8, 6, -6]} intensity={0.35} color={amber ? '#ffc070' : '#bcd2e0'} />
-      <Environment resolution={128} frames={1} environmentIntensity={env === 'void' ? 0.8 : 0.55}>
+      <Environment resolution={128} frames={1} environmentIntensity={env === 'void' ? 0.62 : 0.55}>
         <color attach="background" args={[amber ? '#20160b' : '#14181b']} />
         <Lightformer form="rect" intensity={amber ? 2.0 : 2.2} color={amber ? '#ffcf86' : '#f4f8f0'} position={[0, 5, 0]} rotation-x={Math.PI / 2} scale={[12, 12, 1]} />
         <Lightformer form="rect" intensity={1.2} color={amber ? '#ffb85c' : '#dfe9f0'} position={[-6, 2, -4]} rotation-y={Math.PI / 3} scale={[6, 3, 1]} />

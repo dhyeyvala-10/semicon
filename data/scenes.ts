@@ -265,8 +265,8 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     mpu: 1e-8,
     environment: 'void',
     views: ['normal', 'section', 'exploded', 'xray'],
-    presets: { transistor: P([9, 7, 11], [0, 0.5, 0]), micro: P([14, 10, 16], [0, 0, 0]) },
-    variants: { compare: { transistor: P([0, 9, 21], [0, 0.8, 0]), micro: P([0, 14, 28], [0, 0, 0]) } },
+    presets: { transistor: P([12, 9, 15], [0, 0.6, 0]), micro: P([16, 12, 19], [0, 0, 0]) },
+    variants: { compare: { transistor: P([0, 11, 27], [0, 0.8, 0]), micro: P([0, 16, 32], [0, 0, 0]) } },
   },
   interconnect: {
     id: 'interconnect',
@@ -286,7 +286,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     environment: 'cleanroom',
     views: ['normal'],
     presets: {
-      micro: P([0, 1.95, 2.0], [0, 1.65, 0.6], 4e-9),
+      micro: P([0, 1.85, 2.45], [0, 1.65, 0.6], 4e-9),
       machine: P([2.4, 2.2, 3.4], [0, 1.2, 0]),
       factory: P([4, 3.2, 5.5], [0, 1.2, 0]),
     },
@@ -302,7 +302,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
       factory: P([3.8, 3.0, 4.4], [0, 1.2, 0]),
       machine: P([1.9, 1.95, 2.2], [0, 1.15, 0]),
       internal: P([0.85, 1.65, 1.0], [0, 1.05, 0]),
-      data: P([0, 2.6, 0.9], [0, 1.0, 0]),
+      data: P([0, 1.75, 0.35], [0, 1.0, 0]),
     },
   },
   probe: {
@@ -314,9 +314,9 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     views: ['normal', 'xray'],
     presets: {
       factory: P([3.6, 2.8, 4.2], [0, 1.1, 0]),
-      machine: P([1.6, 1.8, 1.9], [0, 1.05, 0]),
-      micro: P([0.35, 1.25, 0.45], [0, 1.02, 0]),
-      data: P([0, 2.4, 1.0], [0, 1.0, 0]),
+      machine: P([1.25, 1.22, 1.35], [0, 1.0, 0]),
+      micro: P([0, 1.95, 2.3], [0, 1.75, 0.6]),
+      data: P([0, 1.8, 0.45], [0, 1.0, 0]),
     },
   },
   dicing: {
@@ -329,7 +329,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     presets: {
       machine: P([1.4, 1.8, 1.7], [0, 1.0, 0]),
       wafer: P([0.55, 1.45, 0.65], [0, 1.0, 0]),
-      micro: P([2.65, 1.3, 0.55], [2.45, 1.05, 0]),
+      micro: P([2.45, 1.6, 1.35], [2.45, 1.45, 0.25]),
       factory: P([3.5, 2.6, 3.8], [1, 1.0, 0]),
     },
   },
@@ -349,7 +349,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     mpu: 1,
     environment: 'assembly',
     views: ['normal', 'xray'],
-    presets: { machine: P([1.8, 2.2, 2.3], [0, 1.1, 0]), factory: P([3.2, 2.8, 3.8], [0, 1.1, 0]), data: P([0, 2.6, 1.6], [0, 1.0, 0.2]) },
+    presets: { machine: P([1.8, 2.2, 2.3], [0, 1.1, 0]), factory: P([3.2, 2.8, 3.8], [0, 1.1, 0]), data: P([0.15, 1.85, 0.75], [0.15, 1.75, -0.5]) },
   },
   shipping: {
     id: 'shipping',

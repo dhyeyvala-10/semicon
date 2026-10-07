@@ -170,12 +170,12 @@ export function drawWafer(g: CanvasRenderingContext2D, size: number, kind: Wafer
     }
     // die body with simplified floorplan blocks
     const grad = g.createLinearGradient(x, y, x + w, y + h);
-    grad.addColorStop(0, '#6f7c8f');
-    grad.addColorStop(0.5, '#8b7aa0');
-    grad.addColorStop(1, '#5f8a92');
+    grad.addColorStop(0, '#6f7d70');
+    grad.addColorStop(0.5, '#8a8a6a');
+    grad.addColorStop(1, '#5f8274');
     g.fillStyle = grad;
     g.fillRect(x + 1, y + 1, w - 2, h - 2);
-    g.fillStyle = 'rgba(30,40,55,0.35)';
+    g.fillStyle = 'rgba(28,36,30,0.35)';
     g.fillRect(x + w * 0.08, y + h * 0.08, w * 0.38, h * 0.36);
     g.fillRect(x + w * 0.54, y + h * 0.08, w * 0.38, h * 0.36);
     g.fillStyle = 'rgba(200,190,140,0.28)';
@@ -295,7 +295,7 @@ export function dieFloorplan(kind: 'cpu' | 'gpu'): THREE.Texture {
   const S = 1024;
   const c = canvas(S, S);
   const g = c.getContext('2d')!;
-  g.fillStyle = '#3c4757';
+  g.fillStyle = '#323d36';
   g.fillRect(0, 0, S, S);
   const block = (x: number, y: number, w: number, h: number, col: string, label?: string) => {
     g.fillStyle = col;
@@ -310,13 +310,13 @@ export function dieFloorplan(kind: 'cpu' | 'gpu'): THREE.Texture {
     }
   };
   if (kind === 'cpu') {
-    for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++) block(0.05 + i * 0.225, 0.06 + j * 0.3, 0.2, 0.26, '#5d6f8c', 'CORE');
-    block(0.05, 0.66, 0.9, 0.14, '#7d6a8f', 'SHARED CACHE');
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 2; j++) block(0.05 + i * 0.225, 0.06 + j * 0.3, 0.2, 0.26, '#5d7a68', 'CORE');
+    block(0.05, 0.66, 0.9, 0.14, '#7d7a5a', 'SHARED CACHE');
     block(0.05, 0.83, 0.42, 0.12, '#58806f', 'MEMORY CTRL');
     block(0.52, 0.83, 0.43, 0.12, '#806f58', 'I/O');
   } else {
     for (let i = 0; i < 8; i++) for (let j = 0; j < 4; j++) block(0.12 + i * 0.095, 0.1 + j * (j < 2 ? 0.17 : 0.17) + (j >= 2 ? 0.1 : 0), 0.085, 0.15, '#5d7f6c', j === 0 && i === 0 ? 'CU' : undefined);
-    block(0.12, 0.44, 0.76, 0.08, '#7d6a8f', 'L2 CACHE');
+    block(0.12, 0.44, 0.76, 0.08, '#7d7a5a', 'L2 CACHE');
     block(0.02, 0.1, 0.07, 0.8, '#806f58', 'PHY');
     block(0.91, 0.1, 0.07, 0.8, '#806f58', 'PHY');
     block(0.12, 0.9, 0.76, 0.07, '#58806f', 'I/O · INTERCONNECT');

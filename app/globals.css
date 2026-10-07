@@ -1963,3 +1963,20 @@ a {
   min-width: 58px;
   text-align: right;
 }
+
+/* metal-stack level toggles (3D-anchored panel) */
+.level-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px;
+  background: var(--panel);
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  pointer-events: auto;
+  min-width: 64px;
+}
+.level-toggles .btn.sm {
+  height: 20px;
+  font-size: 10px;
+}

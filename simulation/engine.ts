@@ -32,7 +32,8 @@ export interface ActiveFailure {
   detectedAt?: number;
 }
 
-const BINS = { A: 4.25, B: 3.9, C: 3.55 };
+/** speed-bin thresholds (GHz, SIMULATED) */
+export const BINS = { A: 4.25, B: 3.9, C: 3.55 };
 
 class Engine {
   readonly player = new StagePlayer();
