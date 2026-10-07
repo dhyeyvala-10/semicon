@@ -55,6 +55,7 @@ export function TechLabel({
   value,
   min = 2,
   tone = 'default',
+  show,
 }: {
   position: V3;
   title: string;
@@ -62,12 +63,16 @@ export function TechLabel({
   value?: () => string;
   min?: 1 | 2 | 3 | 4;
   tone?: 'default' | 'accent' | 'warn';
+  /** optional visibility predicate evaluated every frame */
+  show?: () => boolean;
 }) {
   const info = useUI((s) => s.info);
   const started = useUI((s) => s.started);
   const ref = useRef<HTMLSpanElement>(null);
+  const box = useRef<HTMLDivElement>(null);
   const acc = useRef(0);
   useFrame((_, dt) => {
+    if (show && box.current) box.current.style.display = show() ? '' : 'none';
     if (!value || !ref.current) return;
     acc.current += dt;
     if (acc.current < 0.12) return;
@@ -77,7 +82,7 @@ export function TechLabel({
   if (info < min || !started) return null;
   return (
     <Html position={position} center={false} zIndexRange={[20, 0]} style={{ pointerEvents: 'none' }}>
-      <div className={`tlabel tlabel-${tone}`}>
+      <div ref={box} className={`tlabel tlabel-${tone}`}>
         <div className="tlabel-title">{title}</div>
         {info >= 3 && lines?.map((l) => <div key={l} className="tlabel-line">{l}</div>)}
         {value && info >= 3 && <span ref={ref} className="tlabel-value" />}

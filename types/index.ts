@@ -132,6 +132,8 @@ export interface TelemetryDef {
   warn?: [number, number];
   /** values outside [lo, hi] → FAULT */
   fault?: [number, number];
+  /** alarm bands apply only during these phases (e.g. a process setpoint, or a result after the step) */
+  bandPhases?: string[];
   sample: (c: TelemetryCtx) => number;
 }
 
@@ -206,6 +208,8 @@ export interface Stage {
   journey?: boolean;
   /** user-selectable modes for this stage (param key → labelled options) */
   modes?: { param: string; label: string; options: string[] }[];
+  /** continuous what-if inputs (param key → range); applied live, no restart */
+  sliders?: { param: string; label: string; min: number; max: number; step: number; unit: string }[];
 }
 
 export interface MachineComponent {

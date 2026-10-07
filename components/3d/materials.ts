@@ -99,3 +99,9 @@ export const STATE_COLOR: Record<string, string> = {
   ALARM: '#e0503f',
   OFFLINE: '#55595e',
 };
+
+/** Effective shell view: looking “inside” a machine automatically cuts its shell away. */
+export function effectiveView(view: ViewMode, cameraMode: string, internal: ViewMode = 'cutaway'): ViewMode {
+  if (view !== 'normal') return view;
+  return cameraMode === 'internal' || cameraMode === 'wafer' || cameraMode === 'micro' ? internal : 'normal';
+}

@@ -38,8 +38,9 @@ export class Channel {
   }
 }
 
-export function classify(def: TelemetryDef, v: number): Status {
+export function classify(def: TelemetryDef, v: number, phaseId?: string): Status {
   if (!isFinite(v)) return 'NORMAL';
+  if (def.bandPhases && phaseId !== undefined && !def.bandPhases.includes(phaseId)) return 'NORMAL';
   if (def.fault && (v < def.fault[0] || v > def.fault[1])) return 'FAULT';
   if (def.warn && (v < def.warn[0] || v > def.warn[1])) return 'WARNING';
   return 'NORMAL';
@@ -88,7 +89,7 @@ export class TelemetryHub {
         v = NaN;
       }
       c.value = v;
-      c.status = classify(c.def, v);
+      c.status = classify(c.def, v, ctx.phaseId);
       const r = c.status === 'FAULT' ? 2 : c.status === 'WARNING' ? 1 : 0;
       if (r > rank) {
         rank = r;

@@ -14,6 +14,9 @@ import { SceneSwitcher } from './SceneSwitcher';
 
 function DebugProbe() {
   const gl = useThree((s) => s.gl);
+  const scene = useThree((s) => s.scene);
+  const camera = useThree((s) => s.camera);
+  if (typeof window !== 'undefined') Object.assign((window as unknown as { fabTwin?: object }).fabTwin ?? {}, { scene, camera, gl });
   const acc = useRef(0);
   useFrame((_, dt) => {
     acc.current += dt;

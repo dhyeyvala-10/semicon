@@ -44,6 +44,10 @@ export const OBJECTS: Record<string, ObjectInfo> = {
   'logic-die': { title: 'Logic die', category: 'Advanced packaging', description: 'Processor die placed next to (2.5D) or under/over (3D) other dies.', kind: 'CONCEPTUAL' },
 
   /* fab */
+  /* cluster tools (deposition, etch, strip) */
+  efem: { title: 'EFEM & load ports', category: 'Cluster tool', description: 'Equipment front-end module: FOUPs dock at the load ports and an atmospheric robot passes wafers to the load locks, all under filtered downflow.' },
+  'load-lock': { title: 'Load lock', category: 'Cluster tool', description: 'Small chamber that is pumped from atmosphere down to vacuum (and vented back) so the transfer and process chambers never see air.' },
+  'transfer-chamber': { title: 'Vacuum transfer chamber', category: 'Cluster tool', description: 'Central hub under vacuum. A vacuum robot moves wafers between load locks and the process chambers through slit valves.' },
   oht: { title: 'OHT vehicle', category: 'Fab logistics', description: 'Overhead hoist vehicle carrying a FOUP along the ceiling rail; lowers it onto load ports.' },
   stocker: { title: 'Stocker', category: 'Automated storage', description: 'Automated FOUP storage tower; a crane moves carriers between shelves and ports.' },
   ffu: { title: 'Fan filter units', category: 'Cleanroom', description: 'Ceiling fans with HEPA/ULPA filters push particle-free air down through the room at low velocity.' },

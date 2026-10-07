@@ -73,6 +73,24 @@ export function StageHUD() {
           </div>
         </div>
       ))}
+      {stage.sliders?.map((sl) => (
+        <div className="hud-row" key={sl.param}>
+          <span className="cap">{sl.label}</span>
+          <input
+            className="hud-slider"
+            type="range"
+            min={sl.min}
+            max={sl.max}
+            step={sl.step}
+            value={engine.params[sl.param] ?? 0}
+            onChange={(e) => engine.setParam(sl.param, +e.target.value)}
+            aria-label={sl.label}
+          />
+          <span className="mono hud-slider-v">
+            {(engine.params[sl.param] ?? 0).toFixed(1)} {sl.unit}
+          </span>
+        </div>
+      ))}
       {info >= 2 && v.phase.caption && <div className="hud-caption">{v.phase.caption}</div>}
       {info >= 2 && chans.length > 0 && (
         <div className="live-strip">

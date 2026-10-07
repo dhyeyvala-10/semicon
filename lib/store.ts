@@ -198,7 +198,7 @@ export const useUI = create<UIState>((set, get) => ({
     });
   },
   setInfo: (l) => set({ info: l }),
-  setCamera: (m) => set((s) => ({ cameraMode: m, cameraNonce: s.cameraNonce + 1, follow: m === 'wafer' ? true : s.follow })),
+  setCamera: (m) => set((s) => ({ cameraMode: m, cameraNonce: s.cameraNonce + 1, follow: m === 'wafer' ? true : m === 'machine' || m === 'internal' ? s.follow : false })),
   setView: (v) => set({ view: v }),
   select: (sel, openTab) =>
     set((s) => ({ selection: sel, panelOpen: sel ? true : s.panelOpen, panelTab: openTab ?? (sel ? 'inspect' : s.panelTab) })),

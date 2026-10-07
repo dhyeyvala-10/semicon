@@ -50,6 +50,8 @@ export default function App() {
     if (initialised) return;
     initialised = true;
     const ui = useUI.getState();
+    // developer handle for the console and automated checks (§129)
+    (window as unknown as { fabTwin: unknown }).fabTwin = { engine, ui: useUI };
     const params = new URLSearchParams(window.location.search);
     const gl = hasWebGL();
     const mobile = window.matchMedia('(max-width: 860px), (pointer: coarse)').matches;

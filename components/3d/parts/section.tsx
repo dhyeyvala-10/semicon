@@ -29,6 +29,39 @@ export function ProfileSlab({ points, depth, m, position, visible = true }: { po
   return <mesh geometry={geo} material={m} position={position} visible={visible} castShadow={false} receiveShadow />;
 }
 
+/**
+ * A cross-section slab whose polygon is recomputed every frame from simulation state.
+ * The geometry is rebuilt only when the (quantised) polygon actually changes.
+ * `compute` returning null hides the slab.
+ */
+export function LiveProfile({ compute, depth, m, position }: { compute: () => [number, number][] | null; depth: number; m: THREE.Material | (() => THREE.Material); position?: V3 }) {
+  const ref = useRef<THREE.Mesh>(null);
+  const key = useRef('');
+  useEffect(() => {
+    const mesh = ref.current;
+    return () => mesh?.geometry.dispose();
+  }, []);
+  useFrame(() => {
+    const mesh = ref.current;
+    if (!mesh) return;
+    const pts = compute();
+    if (!pts || pts.length < 3) {
+      mesh.visible = false;
+      return;
+    }
+    mesh.visible = true;
+    const k = pts.map((p) => `${p[0].toFixed(4)},${p[1].toFixed(4)}`).join(';');
+    if (k !== key.current) {
+      key.current = k;
+      const old = mesh.geometry;
+      mesh.geometry = profileGeometry(pts, depth);
+      old.dispose();
+    }
+    if (typeof m === 'function') mesh.material = m();
+  });
+  return <mesh ref={ref} material={typeof m === 'function' ? m() : m} position={position} receiveShadow />;
+}
+
 /** Rectangle helper for profile polygons. */
 export const rect = (x0: number, y0: number, x1: number, y1: number): [number, number][] => [
   [x0, y0],
@@ -55,6 +88,7 @@ export function Inset({
   children,
   schematic = true,
   rotationY = 0,
+  always = false,
 }: {
   id: string;
   position: V3;
@@ -65,8 +99,12 @@ export function Inset({
   children: ReactNode;
   schematic?: boolean;
   rotationY?: number;
+  /** keep visible in factory / machine camera modes (default: hidden there to keep machine views clear) */
+  always?: boolean;
 }) {
   const info = useUI((s) => s.info);
+  const cam = useUI((s) => s.cameraMode);
+  const hidden = !always && (cam === 'factory' || cam === 'machine');
   useEffect(() => {
     scaleRegions.set(id, { id, center: new THREE.Vector3(...position), radius: Math.max(size[0], size[1]) * 0.9, mpu, label: schematic ? 'SCHEMATIC' : undefined });
     return () => {
@@ -74,7 +112,7 @@ export function Inset({
     };
   }, [id, position, size, mpu, schematic]);
   const [w, h] = size;
-  const local = 1; // inset content units are scaled by group scale below
+  if (hidden) return null;
   return (
     <group position={position} rotation={[0, rotationY, 0]}>
       <mesh position={[0, 0, -0.02]} scale={[w, h, 1]} material={frameMat}>
@@ -83,7 +121,7 @@ export function Inset({
       <lineSegments position={[0, 0, -0.019]} material={borderMat}>
         <edgesGeometry args={[new THREE.PlaneGeometry(w, h)]} />
       </lineSegments>
-      <group scale={local}>{children}</group>
+      <group>{children}</group>
       {anchor && (
         <Line
           points={[

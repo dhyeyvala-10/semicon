@@ -112,6 +112,7 @@ export const STAGES: Stage[] = [
       T('power', 'Electrode power', 'MW', 0, 40, (c) => (isP(c, 'smelt') ? 30 : isP(c, 'charge') ? 22 : 18) + 1.2 * c.noise(3)),
       T('co', 'CO off-gas', 'kNm³/h', 0, 30, (c) => (isP(c, 'smelt') ? 20 * smooth(c.phaseT * 3) : 4) + c.noise(4)),
     ],
+    views: ['normal', 'cutaway'],
     facts: [
       { label: 'Overall reaction', value: 'SiO₂ + 2C → Si + 2CO', kind: 'REAL', source: 'usgs-si' },
       { label: 'Purity', value: '≈ 98–99 %', kind: 'REPRESENTATIVE', source: 'plummer2000' },
@@ -147,7 +148,11 @@ export const STAGES: Stage[] = [
       T('purity', 'Purity (nines)', 'N', 1, 11, (c) => (isP(c, 'react') ? 2 : isP(c, 'condense') ? 2 + c.phaseT : isP(c, 'distill') ? 3 + 6.5 * smooth(c.phaseT) : 9.5), { decimals: 1 }),
       T('column', 'Column top temp', '°C', 0, 80, (c) => 32 + (isP(c, 'distill') ? 1.5 * c.noise(6) : 0), { decimals: 1, target: 32 }),
     ],
-    facts: [{ label: 'Reaction', value: 'Si + 3HCl → SiHCl₃ + H₂', kind: 'REAL', source: 'plummer2000' }],
+    views: ['normal', 'cutaway'],
+    facts: [
+      { label: 'Reaction', value: 'Si + 3HCl → SiHCl₃ + H₂', kind: 'REAL', source: 'plummer2000' },
+      { label: 'Boiling points', value: 'BCl₃ 12.5 °C · SiHCl₃ 31.8 °C · PCl₃ 76 °C', kind: 'REAL', source: 'plummer2000' },
+    ],
     sources: ['plummer2000'],
   },
   {
@@ -179,6 +184,7 @@ export const STAGES: Stage[] = [
       T('rodD', 'Rod diameter', 'mm', 0, 180, (c) => (isP(c, 'heat') ? 8 : isP(c, 'deposit') ? lerp(8, 150, c.phaseT) : 150), { decimals: 0 }),
       T('tcs', 'TCS flow', 'kg/h', 0, 400, (c) => (isP(c, 'deposit') ? lerp(120, 320, c.phaseT) + 6 * c.noise(8) : 0), { decimals: 0 }),
     ],
+    views: ['normal', 'cutaway'],
     facts: [
       { label: 'Purity', value: '9N–11N', kind: 'REPRESENTATIVE', source: 'plummer2000' },
       { label: 'Rod temperature', value: '≈ 1100 °C', kind: 'REPRESENTATIVE', source: 'plummer2000' },
@@ -215,7 +221,7 @@ export const STAGES: Stage[] = [
     outputs: ['Single-crystal ingot'],
     effect: { form: 'ingot', location: 'Crystal growth hall' },
     telemetry: [
-      T('melt', 'Melt temperature', '°C', 1380, 1460, (c) => (isP(c, 'melt') ? lerp(1385, 1425, smooth(c.phaseT)) : 1420 - 3 * smooth(seg(c.stageT, 0.3, 1))) + 0.6 * c.noise(9) + 18 * c.fail('cz-temp'), { decimals: 1, target: 1420, warn: [1412, 1428], fault: [1408, 1435] }),
+      T('melt', 'Melt temperature', '°C', 1380, 1460, (c) => (isP(c, 'melt') ? lerp(1414, 1424, smooth(c.phaseT)) : 1420 - 3 * smooth(seg(c.stageT, 0.3, 1))) + 0.6 * c.noise(9) + 26 * c.fail('cz-temp'), { decimals: 1, target: 1420, warn: [1412, 1430], fault: [1405, 1440] }),
       T('pull', 'Pull rate', 'mm/min', 0, 4, (c) => czPullRate(c.phaseId) * (1 + 0.04 * c.noise(10)) - 0.4 * c.fail('cz-temp'), { decimals: 2 }),
       T('diam', 'Crystal diameter', 'mm', 0, 340, (c) => {
         const L = czLength(c.phaseId, c.phaseT);
@@ -277,7 +283,7 @@ export const STAGES: Stage[] = [
       ph('mount', 'Mount ingot', 2, 'MACHINE_LOADING', 'LOADING', 'machine'),
       ph('crop-top', 'Crop crown', 3, 'PROCESSING', 'PROCESSING', 'machine', 'The seed cone is cut off'),
       ph('crop-tail', 'Crop tail', 3, 'PROCESSING', 'PROCESSING', 'machine', 'The tapered tail is removed'),
-      ph('section', 'Check resistivity', 2.5, 'INSPECTION', 'IDLE', 'machine', 'Ends are tested; only the in-spec body continues'),
+      ph('section', 'Cut blocks · test slices', 3, 'INSPECTION', 'PROCESSING', 'machine', 'The body is cut into blocks; thin test slices are measured'),
     ],
     summary: 'The cone-shaped crown and tail are cut away, leaving the usable cylindrical body.',
     why: 'Only the constant-diameter body produces full-size wafers with uniform properties.',
@@ -376,7 +382,7 @@ export const STAGES: Stage[] = [
     effect: { form: 'wafer', surface: 'as-cut', thicknessUm: 925, location: 'Wafering line' },
     telemetry: [
       T('wire', 'Wire speed', 'm/s', 0, 20, (c) => (isP(c, 'cut') ? 12 * Math.sign(Math.sin(c.t * 0.9)) * Math.min(1, Math.abs(Math.sin(c.t * 0.9)) * 6) : isP(c, 'tension') ? 2 : 0), { decimals: 1, min: -20 }),
-      T('tension', 'Wire tension', 'N', 0, 40, (c) => (isP(c, 'mount') ? 0 : isP(c, 'tension') ? 25 * smooth(c.phaseT) : 25) + 0.3 * c.noise(19) - 9 * c.fail('wire-tension'), { decimals: 1, target: 25, warn: [22, 28], fault: [18, 32] }),
+      T('tension', 'Wire tension', 'N', 0, 40, (c) => (isP(c, 'mount') ? 0 : isP(c, 'tension') ? 25 * smooth(c.phaseT) : 25) + 0.3 * c.noise(19) - 9 * c.fail('wire-tension'), { decimals: 1, target: 25, bandPhases: ['cut', 'retract'], warn: [22, 28], fault: [18, 32] }),
       T('depth', 'Cut depth', 'mm', 0, 310, (c) => (isP(c, 'cut') ? 300 * c.phaseT : after(c, ['mount', 'tension', 'cut', 'retract', 'separate'], 'cut') ? 300 : 0), { decimals: 0 }),
       T('kerf', 'Kerf width', 'µm', 0, 250, (c) => (after(c, ['mount', 'tension', 'cut'], 'tension') ? 160 + 2 * c.noise(20) : 0), { decimals: 0, kind: 'REPRESENTATIVE' }),
     ],
@@ -652,13 +658,13 @@ export const STAGES: Stage[] = [
       T('temp', 'Tube temperature', '°C', 500, 1150, (c) => {
         const base = isP(c, 'load', 'raise') ? 700 : isP(c, 'ramp') ? lerp(700, 1000, smooth(c.phaseT)) : isP(c, 'oxidize', 'anneal') ? 1000 : isP(c, 'cool') ? lerp(1000, 700, smooth(c.phaseT)) : 700;
         return base + 0.5 * c.noise(27) + 35 * c.fail('temp-drift') * (isP(c, 'oxidize', 'anneal') ? 1 : 0);
-      }, { decimals: 1, target: 1000, warn: [990, 1010], fault: [980, 1025] }),
+      }, { decimals: 1, target: 1000, bandPhases: ['oxidize', 'anneal'], warn: [990, 1010], fault: [980, 1025] }),
       T('o2', 'O₂ flow', 'slm', 0, 12, (c) => (isP(c, 'oxidize') ? 10 : 0) + (isP(c, 'oxidize') ? 0.08 * c.noise(28) : 0), { decimals: 2 }),
       T('tox', 'Oxide thickness (Deal–Grove)', 'nm', 0, 80, (c) => {
         const T0 = 1000 + 35 * c.fail('temp-drift');
         const hours = isP(c, 'oxidize') ? c.phaseT : after(c, ['load', 'raise', 'ramp', 'oxidize', 'anneal', 'cool', 'unload'], 'oxidize') ? 1 : 0;
         return 1000 * dealGrove(hours, T0) ;
-      }, { decimals: 1, target: 55, warn: [50, 60], fault: [45, 65] }),
+      }, { decimals: 1, target: 55, bandPhases: ['anneal', 'cool', 'unload'], warn: [50, 60], fault: [45, 65] }),
     ],
     facts: [
       { label: 'Model', value: 'Deal–Grove, dry O₂, (100) Si — 60 min simulated', kind: 'REPRESENTATIVE', source: 'dealgrove1965' },
@@ -842,6 +848,7 @@ export const STAGES: Stage[] = [
     machine: 'scanner',
     robot: 'wafer-stage',
     location: 'LITHO BAY · SCANNER 03 · MEASURE SIDE',
+    sliders: [{ param: 'alignError', label: 'MISALIGN', min: -12, max: 12, step: 0.5, unit: 'nm' }],
     phases: [
       ph('load', 'Wafer onto chuck', 3, 'MACHINE_LOADING', 'LOADING', 'machine'),
       ph('level', 'Height map', 3, 'MACHINE_LOADING', 'PROCESSING', 'internal', 'The level sensor maps the surface for focus'),
@@ -894,7 +901,7 @@ export const STAGES: Stage[] = [
     telemetry: [
       T('fields', 'Fields exposed', 'count', 0, FIELD_COUNT, (c) => (isP(c, 'swap') ? 0 : isP(c, 'expose') ? Math.floor(FIELD_COUNT * c.phaseT) : FIELD_COUNT), { decimals: 0 }),
       T('vel', 'Wafer stage scan speed', 'mm/s', 0, 800, (c) => (isP(c, 'expose') ? 500 * Math.abs(Math.sin(c.phaseT * FIELD_COUNT * Math.PI)) : 0), { decimals: 0, kind: 'SIMULATED' }),
-      T('dose', 'Dose', 'mJ/cm²', 0, 60, (c) => (isP(c, 'expose') ? 30 + 0.3 * c.noise(37) : 0), { decimals: 2, target: 30, warn: [29, 31] }),
+      T('dose', 'Dose', 'mJ/cm²', 0, 60, (c) => (isP(c, 'expose') ? 30 + 0.3 * c.noise(37) : 0), { decimals: 2, target: 30, bandPhases: ['expose'], warn: [29, 31] }),
       T('focus', 'Focus error', 'nm', -40, 40, (c) => (isP(c, 'expose') ? 3 * c.noise(38) : 0), { decimals: 1, min: -40, warn: [-15, 15] }),
     ],
     facts: [

@@ -1948,3 +1948,18 @@ a {
     display: none;
   }
 }
+
+/* what-if slider in the stage HUD (e.g. misalignment) */
+.hud-slider {
+  flex: 1;
+  min-width: 120px;
+  max-width: 220px;
+  accent-color: var(--accent);
+  height: 18px;
+}
+.hud-slider-v {
+  font-size: 10px;
+  color: var(--data);
+  min-width: 58px;
+  text-align: right;
+}
