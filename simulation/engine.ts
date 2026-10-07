@@ -129,6 +129,11 @@ class Engine {
     if (ji >= 0) {
       const prevIdx = JOURNEY.findIndex((s) => s.id === prev.id);
       if (opts.rebuild || prevIdx !== ji - 1) this.twin.rebuild(JOURNEY, ji);
+      else {
+        // stepping forward before the previous stage finished: complete it so the twin stays consistent
+        const h = this.twin.history[this.twin.history.length - 1];
+        if (h && h.stageId === prev.id && h.result === 'IN PROGRESS') this.twin.completeStage(prev, this.time);
+      }
       this.twin.enterStage(stage, this.time);
     }
     this.robot.loop = false;

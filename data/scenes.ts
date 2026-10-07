@@ -105,11 +105,11 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     views: ['normal', 'section'],
     presets: {},
     variants: {
-      edge: { machine: P([-10.4, 1.9, 2.6], [-12, 1.05, 0]), micro: P([-12.85, 2.25, 1.75], [-12.9, 2.1, 0.9], 2e-5), wafer: P([-11.5, 1.4, 0.9], [-12, 1.05, 0]) },
-      lap: { machine: P([-2.2, 2.3, 3.2], [-4, 1.0, 0]), micro: P([-4.85, 2.25, 1.75], [-4.9, 2.1, 0.9], 2e-5) },
-      etch: { machine: P([5.8, 2.3, 3.4], [4, 1.0, 0]), micro: P([3.15, 2.25, 1.75], [3.1, 2.1, 0.9], 2e-5) },
-      polish: { machine: P([13.8, 2.3, 3.2], [12, 1.0, 0]), micro: P([11.15, 2.25, 1.75], [11.1, 2.1, 0.9], 2e-5), wafer: P([12.5, 1.5, 1.1], [12, 1.05, 0]) },
-      clean: { machine: P([22.4, 2.6, 4.2], [20, 1.1, 0]), micro: P([19.15, 2.25, 1.75], [19.1, 2.1, 0.9], 2e-6), factory: P([26, 4.5, 8], [18, 1.2, 0]) },
+      edge: { machine: P([-10.4, 1.9, 2.6], [-12, 1.05, 0]), micro: P([-12.9, 2.3, 2.7], [-12.9, 2.1, 0.9], 2e-5), wafer: P([-11.5, 1.4, 0.9], [-12, 1.05, 0]) },
+      lap: { machine: P([-2.2, 2.3, 3.2], [-4, 1.0, 0]), micro: P([-4.9, 2.3, 2.7], [-4.9, 2.1, 0.9], 2e-5) },
+      etch: { machine: P([5.8, 2.3, 3.4], [4, 1.0, 0]), micro: P([3.1, 2.3, 2.7], [3.1, 2.1, 0.9], 2e-5) },
+      polish: { machine: P([13.8, 2.3, 3.2], [12, 1.0, 0]), micro: P([11.1, 2.3, 2.7], [11.1, 2.1, 0.9], 2e-5), wafer: P([12.5, 1.5, 1.1], [12, 1.05, 0]) },
+      clean: { machine: P([22.4, 2.6, 4.2], [20, 1.1, 0]), micro: P([19.1, 2.3, 2.7], [19.1, 2.1, 0.9], 2e-6), factory: P([26, 4.5, 8], [18, 1.2, 0]) },
     },
   },
   robot: {
@@ -266,7 +266,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
     environment: 'void',
     views: ['normal', 'section', 'exploded', 'xray'],
     presets: { transistor: P([12, 9, 15], [0, 0.6, 0]), micro: P([16, 12, 19], [0, 0, 0]) },
-    variants: { compare: { transistor: P([0, 11, 27], [0, 0.8, 0]), micro: P([0, 16, 32], [0, 0, 0]) } },
+    variants: { compare: { transistor: P([0, 12, 31], [0, 0.6, 0]), micro: P([0, 16, 34], [0, 0, 0]) } },
   },
   interconnect: {
     id: 'interconnect',
@@ -318,6 +318,7 @@ export const SCENES: Record<SceneId, SceneConfig> = {
       micro: P([0, 1.95, 2.3], [0, 1.75, 0.6]),
       data: P([0, 1.8, 0.45], [0, 1.0, 0]),
     },
+    variants: { sort: { micro: P([0.32, 1.32, 0.42], [0, 1.03, 0]), data: P([0, 1.8, 0.45], [0, 1.0, 0]) } },
   },
   dicing: {
     id: 'dicing',

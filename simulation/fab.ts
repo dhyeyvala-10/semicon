@@ -218,6 +218,7 @@ export class FabSim {
 
   private newLot(step: number, followed = false): SimLot {
     this.lotSeq++;
+    if (this.lotSeq === 731) this.lotSeq++; // A0731 is reserved for the followed lot
     const lot: SimLot = {
       id: followed ? 'LOT-A0731' : `LOT-A${String(this.lotSeq).padStart(4, '0')}`,
       wafers: 25,

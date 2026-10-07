@@ -55,8 +55,11 @@ export function CameraRig() {
     if (!preset) return;
     const c = controls.current;
     const target = c ? c.target.clone() : new THREE.Vector3();
-    const p1 = new THREE.Vector3(...preset.pos);
     const t1 = new THREE.Vector3(...preset.target);
+    const p1 = new THREE.Vector3(...preset.pos);
+    // presets are framed for landscape; in portrait the horizontal field shrinks, so pull back
+    const aspect = (camera as THREE.PerspectiveCamera).aspect || 1.6;
+    if (aspect < 1.2) p1.sub(t1).multiplyScalar(Math.min(2.4, 1.35 / aspect)).add(t1);
     const sceneChanged = lastScene.current !== st.scene;
     lastScene.current = st.scene;
     lastFocus.current = null;

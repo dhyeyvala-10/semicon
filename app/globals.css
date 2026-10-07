@@ -1895,9 +1895,24 @@ a {
   .nav {
     display: none;
   }
+  .brand > span:not(:first-child) {
+    display: none;
+  }
+  .topbar-right {
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .topbar-right .seg button {
+    padding: 0 6px;
+    font-size: 9px;
+  }
+  .rail.collapsed {
+    width: 40px;
+  }
   .hud {
-    left: 12px !important;
-    max-width: calc(100vw - 24px);
+    left: 48px !important;
+    max-width: calc(100vw - 56px);
   }
   .hud-title {
     font-size: 16px;
@@ -1905,14 +1920,35 @@ a {
   .waferhud {
     display: none;
   }
+  /* camera modes become one compact horizontal strip above the transport */
   .toolbar {
     top: auto;
-    bottom: 120px;
+    bottom: 92px;
+    left: 48px;
     right: 8px;
-    max-height: 40vh;
+    max-height: none;
+    overflow-x: auto;
+    overflow-y: hidden;
+    align-items: stretch;
   }
   .toolbar .tool-group:not(:first-child) {
     display: none;
+  }
+  .toolbar .tool-group:first-child {
+    flex-direction: row;
+    min-width: 0;
+    padding: 4px;
+    gap: 4px;
+  }
+  .toolbar .tool-group:first-child .cap {
+    display: none;
+  }
+  .toolbar .tool-group:first-child .btn {
+    width: auto;
+    flex: 0 0 auto;
+    height: 26px;
+    font-size: 9.5px;
+    padding: 0 7px;
   }
   .transport {
     left: 50% !important;
