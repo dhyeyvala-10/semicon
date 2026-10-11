@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useUI, type OverlayId } from '@/lib/store';
 import { engine } from '@/simulation/engine';
 import type { ExperienceMode, InfoLevel } from '@/types';
+import { enterExplore } from '../story/Story';
 
 interface MenuItem {
   label: string;
@@ -120,6 +121,7 @@ export function TopBar() {
   const setOverlay = useUI((s) => s.setOverlay);
   const fallback = useUI((s) => s.fallback2D);
   const set = useUI((s) => s.set);
+  const started = useUI((s) => s.started);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -130,6 +132,25 @@ export function TopBar() {
     return () => window.removeEventListener('mousedown', close);
   }, []);
 
+  if (!started)
+    return (
+      <div className="topbar story-bar" ref={ref}>
+        <div className="brand" title="FAB/TWIN">
+          <i />
+          <b>FAB/TWIN</b>
+          <span>SEMICONDUCTOR DIGITAL TWIN</span>
+        </div>
+        <div className="topbar-right">
+          <button className={`btn icon ${sound ? 'on' : ''}`} title={sound ? 'Sound on' : 'Sound off'} onClick={() => toggle('sound')}>
+            {sound ? '♪' : '∅'}
+          </button>
+          <button className="btn story-explore" onClick={() => enterExplore(engine.stage.id)} title="Open the full digital twin at this step">
+            Explore the twin
+          </button>
+        </div>
+      </div>
+    );
+
   const exps: [ExperienceMode, string][] = [
     ['watch', 'WATCH'],
     ['control', 'CONTROL'],
@@ -138,7 +159,7 @@ export function TopBar() {
   ];
   return (
     <div className="topbar" ref={ref}>
-      <div className="brand" onClick={() => set({ started: false })} title="Back to the entrance">
+      <div className="brand" onClick={() => set({ started: false, panelOpen: false, overlay: null })} title="Back to the scroll story">
         <i />
         <b>FAB/TWIN</b>
         <span>SEMICONDUCTOR DIGITAL TWIN</span>

@@ -160,7 +160,7 @@ export const useUI = create<UIState>((set, get) => ({
       panelTab: exp === 'learn' ? 'ask' : s.panelTab === 'inspect' && !s.selection ? s.panelTab : s.panelTab,
       transition: sceneChange ? { active: true, label: stage.location, sub: stage.title } : s.transition,
     }));
-    if (typeof window !== 'undefined') {
+    if (typeof window !== 'undefined' && get().started) {
       const url = new URL(window.location.href);
       url.searchParams.set('stage', id);
       window.history.replaceState(null, '', url.toString());

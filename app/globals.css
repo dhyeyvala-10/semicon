@@ -1986,3 +1986,349 @@ a {
   color: var(--text-3);
   margin-top: 4px;
 }
+
+/* =========================================================================
+   SCROLL STORY — the page scrolls, the factory stays fixed behind it
+   ========================================================================= */
+
+.st-scroll {
+  position: absolute;
+  inset: 0;
+  z-index: 30;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  outline: none;
+  -webkit-overflow-scrolling: touch;
+}
+.st-scroll::-webkit-scrollbar {
+  display: none;
+}
+/* static legibility scrim on the text side: no blur, no blend */
+.st-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  background: linear-gradient(90deg, rgba(5, 7, 6, 0.86) 0%, rgba(5, 7, 6, 0.55) 30%, transparent 56%);
+}
+.st-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  pointer-events: none;
+  background: #050706;
+  opacity: 1;
+  will-change: opacity;
+}
+
+/* hero: the old entrance, now the first section of the page */
+.st-hero.landing {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  height: 100vh;
+  min-height: 560px;
+  padding: calc(var(--top) + 7vh) 5vw 5vh;
+  pointer-events: auto;
+}
+/* one section per stage; the copy is sticky while its section passes */
+.st-sec,
+.st-outro {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+.st-outro {
+  height: 120vh;
+  justify-content: center;
+}
+.st-copy {
+  position: sticky;
+  top: calc(var(--top) + 15vh);
+  width: min(500px, 38vw);
+  margin-left: 6vw;
+  padding: 0 0 4vh;
+}
+.st-outro .st-copy {
+  top: 30vh;
+}
+.st-act {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.2em;
+  color: var(--text-3);
+  margin-bottom: 18px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.st-act b {
+  color: var(--seg, var(--accent));
+  font-weight: 500;
+}
+.st-act::after {
+  content: '';
+  flex: 1;
+  max-width: 120px;
+  height: 1px;
+  background: linear-gradient(90deg, var(--seg, var(--accent)), transparent);
+}
+.st-num {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--seg, var(--accent));
+  margin-bottom: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.st-copy h2 {
+  margin: 0 0 14px;
+  font-size: clamp(26px, 3.1vw, 44px);
+  line-height: 1.04;
+  font-weight: 650;
+  letter-spacing: -0.025em;
+  color: var(--text);
+  text-wrap: balance;
+}
+.st-copy p {
+  margin: 0 0 18px;
+  font-size: 15.5px;
+  line-height: 1.62;
+  color: var(--text-2);
+  max-width: 460px;
+}
+.st-change {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 18px;
+}
+.st-change span {
+  padding: 4px 9px;
+  border: 1px solid var(--line-2);
+  border-radius: 999px;
+  background: rgba(10, 13, 11, 0.6);
+}
+.st-change span:last-child {
+  border-color: color-mix(in oklab, var(--seg, var(--accent)) 60%, transparent);
+  color: var(--text);
+}
+.st-change i {
+  font-style: normal;
+  color: var(--seg, var(--accent));
+}
+.st-fact {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: baseline;
+  column-gap: 12px;
+  row-gap: 2px;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line);
+  margin-bottom: 18px;
+}
+.st-fact b {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 22px;
+  color: var(--glow);
+  grid-row: span 2;
+}
+.st-fact span {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.st-fact .dtag {
+  justify-self: start;
+}
+.st-explore {
+  background: none;
+  border: none;
+  padding: 4px 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--line-2);
+  transition: color 0.2s, border-color 0.2s;
+}
+.st-explore:hover {
+  color: var(--glow);
+  border-color: var(--glow);
+}
+.st-explore i {
+  font-style: normal;
+  margin-left: 4px;
+}
+
+/* the operation running now (follows the scroll) */
+.st-now {
+  position: absolute;
+  z-index: 31;
+  left: 6vw;
+  bottom: 3.2vh;
+  max-width: min(560px, 60vw);
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-2);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.4s;
+}
+.st-now b {
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* progress rail with act ticks */
+.st-rail {
+  position: absolute;
+  z-index: 31;
+  right: 18px;
+  top: calc(var(--top) + 9vh);
+  bottom: 9vh;
+  width: 2px;
+  background: var(--line);
+  border-radius: 2px;
+}
+.st-rail-fill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(var(--accent), var(--glow));
+  transform-origin: top;
+  transform: scaleY(0);
+  border-radius: 2px;
+}
+.st-rail button {
+  position: absolute;
+  right: -5px;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  background: #0a0d0b;
+  padding: 0;
+}
+.st-rail button span {
+  position: absolute;
+  right: 18px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--text-3);
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.2s;
+  pointer-events: none;
+}
+.st-rail:hover button span,
+.st-rail button:focus-visible span {
+  opacity: 1;
+}
+.st-rail button:hover {
+  border-color: var(--accent);
+}
+
+/* story top bar: brand and one action */
+.story-bar {
+  background: linear-gradient(180deg, rgba(5, 7, 6, 0.9), rgba(5, 7, 6, 0));
+  border-bottom: none;
+}
+.story-bar .topbar-right {
+  margin-left: auto;
+}
+.story-explore {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 999px;
+  border-color: var(--accent-line);
+  color: var(--text);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+}
+.story-explore:hover {
+  border-color: var(--accent);
+  color: var(--glow);
+}
+
+@media (max-width: 860px), (orientation: portrait) {
+  /* phones: subject in the upper half, text pinned to the bottom of its section */
+  .st-scrim {
+    background: linear-gradient(0deg, rgba(5, 7, 6, 0.94) 0%, rgba(5, 7, 6, 0.75) 34%, transparent 62%);
+  }
+  .st-sec {
+    justify-content: flex-end;
+  }
+  .st-copy {
+    top: auto;
+    bottom: 0;
+    width: auto;
+    margin: 0;
+    padding: 0 18px calc(18px + env(safe-area-inset-bottom));
+  }
+  .st-outro .st-copy {
+    top: auto;
+  }
+  .st-act {
+    margin-bottom: 10px;
+    font-size: 9.5px;
+  }
+  .st-copy h2 {
+    font-size: clamp(24px, 7vw, 32px);
+    margin-bottom: 10px;
+  }
+  .st-copy p {
+    font-size: 14px;
+    line-height: 1.55;
+    margin-bottom: 12px;
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .st-change {
+    display: none;
+  }
+  .st-fact {
+    margin-bottom: 10px;
+    padding-top: 10px;
+  }
+  .st-fact b {
+    font-size: 18px;
+  }
+  .st-now {
+    display: none;
+  }
+  .st-rail {
+    top: calc(var(--top) + 2px);
+    bottom: auto;
+    left: 0;
+    right: 0;
+    width: auto;
+    height: 2px;
+    border-radius: 0;
+  }
+  .st-rail-fill {
+    transform-origin: left;
+  }
+  .st-rail button {
+    display: none;
+  }
+  .st-hero.landing {
+    padding: calc(var(--top) + 4vh) 18px 4vh;
+    min-height: 0;
+  }
+}

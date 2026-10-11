@@ -31,6 +31,8 @@ export class StagePlayer {
   /** normalised 0..1 scrub override for “what changes?” */
   override: number | null = null;
   completed = false;
+  /** timeline position is set from outside (scroll story); time does not advance on its own */
+  driven = false;
   private hold = 0;
   private lastPhase = -1;
   private resync = false;
@@ -76,7 +78,7 @@ export class StagePlayer {
   /** Advance by dt seconds of wall time. Returns events to be handled by the engine. */
   tick(dt: number): PlayerEvent[] {
     const ev: PlayerEvent[] = [];
-    if (this.playing && !this.completed) {
+    if (this.playing && !this.completed && !this.driven) {
       const prev = this.t;
       this.t = Math.min(this.duration, this.t + dt * this.speed);
       if (this.stepTarget !== null) {
@@ -101,7 +103,7 @@ export class StagePlayer {
       this.lastPhase++;
       ev.push({ type: 'phase', index: this.lastPhase, phase: this.stage.phases[this.lastPhase], resync: false });
     }
-    if (this.playing && !this.completed && this.t >= this.duration) {
+    if (this.playing && !this.completed && !this.driven && this.t >= this.duration) {
       this.completed = true;
       this.hold = 0;
       ev.push({ type: 'complete' });
@@ -122,6 +124,14 @@ export class StagePlayer {
     this.stepTarget = null;
     this.resync = true;
     this.view = this.computeView(this.t);
+  }
+
+  /** Externally driven position (0..1 of the stage). Phase events follow on the next tick, in order. */
+  scrub(u: number) {
+    this.t = Math.min(Math.max(0, u), 1) * this.duration;
+    this.completed = false;
+    this.stepTarget = null;
+    this.view = this.computeView(this.override !== null ? this.override * this.duration : this.t);
   }
 
   restart() {

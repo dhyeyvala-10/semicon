@@ -18,7 +18,7 @@ import { WaferHUD, ScaleBar, HoverTip, DebugOverlay } from './ui/Hud';
 import { SidePanel } from './ui/SidePanel';
 import { Overlays } from './ui/Overlays';
 import { Loader, TransitionVeil, Finale } from './ui/Screens';
-import { Landing } from './ui/Landing';
+import { Story } from './story/Story';
 import { GradeDriver, GradeOverlay } from './ui/Grade';
 import { Fallback2D } from './fallback/Fallback2D';
 
@@ -120,6 +120,8 @@ export default function App() {
         return;
       }
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      // in the scroll story the keyboard scrolls the page
+      if (!ui.started && e.key !== 'Escape' && e.key !== '`') return;
       if (e.key === 'Escape') {
         if (ui.overlay) ui.setOverlay(null);
         else if (ui.panelOpen) ui.closePanel();
@@ -175,10 +177,10 @@ export default function App() {
           <ScaleBar />
         </>
       )}
+      {!started && <Story />}
       <SidePanel />
-      <Landing />
-      <TransitionVeil />
-      <Finale />
+      {started && <TransitionVeil />}
+      {started && <Finale />}
       <Overlays />
       <HoverTip />
       <DebugOverlay />
