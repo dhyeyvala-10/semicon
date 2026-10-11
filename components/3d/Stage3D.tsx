@@ -4,9 +4,9 @@
  * renderer, camera rig, scene switcher and debug probe together.
  */
 import * as THREE from 'three';
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
-import { PerformanceMonitor, AdaptiveDpr } from '@react-three/drei';
+import { PerformanceMonitor } from '@react-three/drei';
 import { useUI } from '@/lib/store';
 import { renderStats } from '@/lib/runtime';
 import { CameraRig } from './CameraRig';
@@ -16,7 +16,8 @@ function DebugProbe() {
   const gl = useThree((s) => s.gl);
   const scene = useThree((s) => s.scene);
   const camera = useThree((s) => s.camera);
-  if (typeof window !== 'undefined') Object.assign((window as unknown as { fabTwin?: object }).fabTwin ?? {}, { scene, camera, gl });
+  const get = useThree((s) => s.get);
+  if (typeof window !== 'undefined') Object.assign((window as unknown as { fabTwin?: object }).fabTwin ?? {}, { scene, camera, gl, r3f: get });
   const acc = useRef(0);
   useFrame((_, dt) => {
     acc.current += dt;
@@ -33,15 +34,21 @@ function DebugProbe() {
   return null;
 }
 
+/** Pixel-ratio range per quality tier. Fill rate, not geometry, is what costs most on laptop GPUs. */
+const DPR: Record<'high' | 'low', [number, number]> = { high: [1, 1.5], low: [0.75, 1] };
+
 export default function Stage3D() {
   const quality = useUI((s) => s.quality);
-  const set = useUI((s) => s.set);
+  const [lo, hi] = DPR[quality];
+  const cap = typeof window === 'undefined' ? 1 : Math.min(window.devicePixelRatio || 1, hi);
+  const [dpr, setDpr] = useState(cap);
+  useEffect(() => setDpr(cap), [cap]);
   return (
     <Canvas
       className="stage-canvas"
       shadows={quality === 'high' ? 'percentage' : false}
-      dpr={quality === 'high' ? [1, 1.75] : [0.75, 1]}
-      gl={{ antialias: true, powerPreference: 'high-performance', localClippingEnabled: true } as THREE.WebGLRendererParameters & { localClippingEnabled: boolean }}
+      dpr={dpr}
+      gl={{ antialias: true, stencil: false, powerPreference: 'high-performance', localClippingEnabled: true } as THREE.WebGLRendererParameters & { localClippingEnabled: boolean }}
       camera={{ fov: 45, near: 0.005, far: 3000, position: [-41.5, 2.1, 0.6] }}
       onCreated={({ gl }) => {
         gl.localClippingEnabled = true;
@@ -51,8 +58,13 @@ export default function Stage3D() {
       }}
       onPointerMissed={() => useUI.getState().select(null)}
     >
-      <PerformanceMonitor onDecline={() => set({ quality: 'low' })} flipflops={2} />
-      <AdaptiveDpr pixelated={false} />
+      {/* Adapts resolution only. Switching shadows or materials here would recompile every shader mid-session. */}
+      <PerformanceMonitor
+        factor={1}
+        flipflops={3}
+        onChange={({ factor }) => setDpr(+Math.max(lo, Math.min(cap, lo + (cap - lo) * factor)).toFixed(2))}
+        onFallback={() => setDpr(lo)}
+      />
       <CameraRig />
       <SceneSwitcher />
       <DebugProbe />

@@ -115,8 +115,18 @@ function Glyph({ macro }: { macro: string }) {
   }
 }
 
-export function Landing() {
+/** The only live part of the entrance; ticking here keeps the rest of the landing static. */
+function LiveLine() {
   useTicker(2);
+  const f = engine.fab;
+  return (
+    <span className="live-line">
+      FAB 1 NOW · {f.lots.length} lots in process · {fmt(f.utilisation(), 0)}% tools processing · {f.activeAlarms()} alarms <i>SIMULATED</i>
+    </span>
+  );
+}
+
+export function Landing() {
   const started = useUI((s) => s.started);
   const start = useUI((s) => s.start);
   const [hover, setHover] = useState<number | null>(null);
@@ -134,7 +144,6 @@ export function Landing() {
   const ribbon = useMemo(() => `linear-gradient(90deg, ${segments.map((s, i) => `${s.color} ${((i + 0.5) / segments.length) * 100}%`).join(', ')})`, [segments]);
   const words = useMemo(() => [gradeAt(0), gradeAt(0.45), gradeAt(1)].map((g) => `linear-gradient(90deg, ${hex(g.glow)}, ${hex(g.accent)} 60%, ${hex(g.accent2)})`), []);
   if (started) return null;
-  const f = engine.fab;
   const go = (stageId: string) => {
     start('control');
     useUI.getState().goToStage(stageId);
@@ -178,9 +187,7 @@ export function Landing() {
       <div className="ribbon-wrap">
         <div className="ribbon-meta">
           <span>EXTRACTION</span>
-          <span className="live-line">
-            FAB 1 NOW · {f.lots.length} lots in process · {fmt(f.utilisation(), 0)}% tools processing · {f.activeAlarms()} alarms <i>SIMULATED</i>
-          </span>
+          <LiveLine />
           <span>SYSTEM</span>
         </div>
         <div className="ribbon">

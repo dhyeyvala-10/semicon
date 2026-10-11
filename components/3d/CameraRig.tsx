@@ -39,6 +39,8 @@ export function CameraRig() {
   const anim = useRef<Anim | null>(null);
   const lastScene = useRef<string>('');
   const lastFocus = useRef<THREE.Vector3 | null>(null);
+  const focusPrev = useRef(new THREE.Vector3());
+  const delta = useRef(new THREE.Vector3());
   const lastPhase = useRef(-1);
   const lastStage = useRef('');
   const probeAcc = useRef(0);
@@ -99,7 +101,7 @@ export function CameraRig() {
     const focus = tracked.get('focus');
     if (follow && focus) {
       if (lastFocus.current) {
-        const d = focus.clone().sub(lastFocus.current);
+        const d = delta.current.subVectors(focus, lastFocus.current);
         if (d.lengthSq() > 0 && d.lengthSq() < 25) {
           camera.position.add(d);
           c.target.add(d);
@@ -115,7 +117,7 @@ export function CameraRig() {
         offset.setLength(dist);
         anim.current = { p0: camera.position.clone(), t0: c.target.clone(), p1: focus.clone().add(offset), t1: focus.clone(), f0: camera.fov, f1: camera.fov, u: 0, dur: 1.2 };
       }
-      lastFocus.current = focus.clone();
+      lastFocus.current = focusPrev.current.copy(focus);
     } else lastFocus.current = null;
 
     // cinematic cues (WATCH / LEARN): phase-specific camera modes
