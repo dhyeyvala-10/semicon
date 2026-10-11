@@ -270,6 +270,8 @@ export function Story() {
     let veilCur = 1;
     let pending: { stage: string; since: number } | null = null;
     let phaseKey = '';
+    let activeK = -1;
+    const sections = () => [el.querySelector<HTMLElement>('[data-hero]'), ...el.querySelectorAll<HTMLElement>('[data-i]'), el.querySelector<HTMLElement>('[data-outro]')];
     const loop = (t: number) => {
       const dt = Math.min(0.1, (t - last) / 1000);
       last = t;
@@ -292,6 +294,13 @@ export function Story() {
       const isOutro = k === secs.length - 1;
       const local = isOutro ? 1 : k === 0 ? 0 : Math.min(1, Math.max(0, (line - sec.top) / sec.h));
       const want = sec.stage;
+      // only the active chapter's copy is shown; the rest fade out
+      if (k !== activeK) {
+        const all = sections();
+        all[activeK]?.classList.remove('on');
+        all[k]?.classList.add('on');
+        activeK = k;
+      }
 
       if (want !== engine.stage.id) {
         const sceneChange = STAGE_BY_ID[want].scene !== engine.stage.scene;
