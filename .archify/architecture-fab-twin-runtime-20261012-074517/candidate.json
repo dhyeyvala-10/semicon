@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "FAB/TWIN — runtime architecture",
+    "locale": "en",
+    "output": ".archify/architecture-fab-twin-runtime-20261012-074517/fab-twin-runtime.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/dhyeyvala-10/semicon",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "40373d2f1817386b9baaaeb2be838cfc6a39b934"
+    }
+  },
+  "components": [
+    {
+      "id": "origin", "type": "cloud", "label": "Next.js static host", "sublabel": "prerendered / + JS chunks",
+      "pos": [40, 40], "size": [150, 64],
+      "sources": [
+        { "path": "app/page.tsx", "line": 1, "end_line": 5, "label": "single prerendered page" },
+        { "path": "components/ClientApp.tsx", "line": 4, "end_line": 9, "label": "app is client-only (ssr: false)" },
+        { "path": "package.json", "line": 7, "end_line": 9, "label": "next build / next start" }
+      ]
+    },
+    {
+      "id": "shell", "type": "frontend", "label": "App shell", "sublabel": "init · loader · mode switch",
+      "pos": [320, 40], "size": [170, 64],
+      "sources": [
+        { "path": "components/App.tsx", "line": 49, "end_line": 61, "label": "runtime checks: WebGL, mobile quality" },
+        { "path": "components/App.tsx", "line": 90, "end_line": 92, "label": "starts the simulation loop" },
+        { "path": "components/App.tsx", "line": 163, "end_line": 190, "label": "story vs Explore layout" }
+      ]
+    },
+    {
+      "id": "explore", "type": "frontend", "label": "Explore UI", "sublabel": "rail · HUDs · panels",
+      "pos": [640, 40], "size": [180, 64],
+      "sources": [
+        { "path": "components/App.tsx", "line": 170, "end_line": 179, "label": "mounted when started" },
+        { "path": "hooks/useTicker.ts", "line": 13, "end_line": 18, "label": "fixed-rate re-render" }
+      ]
+    },
+    {
+      "id": "visitor", "type": "external", "label": "Visitor", "sublabel": "desktop or phone browser",
+      "pos": [40, 240], "size": [150, 64]
+    },
+    {
+      "id": "story", "type": "frontend", "label": "Scroll story", "sublabel": "reading line → stage, t",
+      "pos": [320, 240], "size": [170, 64],
+      "sources": [
+        { "path": "components/story/Story.tsx", "line": 275, "end_line": 316, "label": "rAF: scroll → stage + scrub" },
+        { "path": "components/story/Story.tsx", "line": 318, "end_line": 325, "label": "veil over scene changes" },
+        { "path": "lib/story.ts", "line": 40, "end_line": 47, "label": "one chapter per journey stage" }
+      ]
+    },
+    {
+      "id": "engine", "type": "backend", "label": "Simulation engine", "sublabel": "rAF · player · twin · FabSim",
+      "pos": [640, 240], "size": [180, 64],
+      "sources": [
+        { "path": "simulation/engine.ts", "line": 87, "end_line": 97, "label": "own requestAnimationFrame loop" },
+        { "path": "simulation/engine.ts", "line": 358, "end_line": 411, "label": "tick: player, robot, fab, telemetry" },
+        { "path": "simulation/player.ts", "line": 129, "end_line": 135, "label": "scrub(u) sets the timeline" }
+      ]
+    },
+    {
+      "id": "scenes", "type": "frontend", "label": "Scene modules", "sublabel": "29 lazy chunks · kit models",
+      "pos": [920, 240], "size": [170, 64],
+      "sources": [
+        { "path": "components/3d/sceneLoaders.ts", "line": 14, "end_line": 51, "label": "dynamic import per scene" },
+        { "path": "lib/anim.ts", "line": 10, "end_line": 31, "label": "animation reads player.view" },
+        { "path": "components/3d/kit/build.ts", "line": 180, "end_line": 192, "label": "static parts merged per finish" }
+      ]
+    },
+    {
+      "id": "store", "type": "messagebus", "label": "UI store", "sublabel": "zustand · stageId, mode",
+      "pos": [492, 380], "size": [150, 64],
+      "sources": [
+        { "path": "lib/store.ts", "line": 103, "end_line": 103, "label": "zustand store" },
+        { "path": "lib/store.ts", "line": 142, "end_line": 147, "label": "goToStage → engine.setStage" }
+      ]
+    },
+    {
+      "id": "renderer", "type": "frontend", "label": "3D renderer", "sublabel": "R3F canvas · camera rig", "tag": "needs WebGL",
+      "pos": [920, 520], "size": [170, 64],
+      "sources": [
+        { "path": "components/3d/Stage3D.tsx", "line": 38, "end_line": 72, "label": "canvas, DPR, performance monitor" },
+        { "path": "components/3d/SceneSwitcher.tsx", "line": 40, "end_line": 66, "label": "mounts only the active scene" },
+        { "path": "components/3d/CameraRig.tsx", "line": 154, "end_line": 160, "label": "story camera path" }
+      ]
+    },
+    {
+      "id": "gpu", "type": "external", "label": "WebGL2 · GPU", "sublabel": "browser graphics stack",
+      "pos": [40, 520], "size": [150, 64],
+      "sources": [
+        { "path": "components/App.tsx", "line": 30, "end_line": 37, "label": "WebGL capability check" },
+        { "path": "components/3d/Stage3D.tsx", "line": 51, "end_line": 51, "label": "context options" }
+      ]
+    }
+  ],
+  "boundaries": [
+    { "kind": "region", "label": "Static origin · files only", "wraps": ["origin"] },
+    { "kind": "region", "label": "Visitor's browser tab · same-origin JS sandbox", "wraps": ["shell", "explore", "story", "engine", "scenes", "store", "renderer"] },
+    { "kind": "security-group", "label": "GPU process · WebGL2 context", "wraps": ["gpu"] }
+  ],
+  "connections": [
+    { "id": "serve", "from": "origin", "to": "shell", "label": "static HTML + JS" },
+    { "id": "mount-story", "from": "shell", "to": "story", "label": "mount (story mode)" },
+    { "id": "mount-explore", "from": "shell", "to": "explore", "label": "mount in Explore", "variant": "dashed" },
+    { "id": "input", "from": "visitor", "to": "story", "label": "scroll · touch", "variant": "emphasis" },
+    { "id": "scrub", "from": "story", "to": "engine", "label": "scrub(t) per frame", "variant": "emphasis" },
+    { "id": "go-to-stage", "from": "story", "to": "store", "label": "goToStage(id)", "fromSide": "bottom", "toSide": "left" },
+    { "id": "set-stage", "from": "store", "to": "engine", "label": "setStage()", "fromSide": "right", "toSide": "bottom" },
+    { "id": "view", "from": "engine", "to": "scenes", "label": "player.view", "variant": "emphasis" },
+    { "id": "ticker", "from": "engine", "to": "explore", "label": "read @ 2–20 Hz", "variant": "dashed" },
+    { "id": "graph", "from": "scenes", "to": "renderer", "label": "scene graph", "variant": "emphasis" },
+    { "id": "draw", "from": "renderer", "to": "gpu", "label": "WebGL2 draw calls", "variant": "emphasis" },
+    { "id": "frames", "from": "gpu", "to": "visitor", "label": "frames", "variant": "emphasis" }
+  ],
+  "cards": [
+    { "dot": "emerald", "title": "Runs entirely in the browser", "items": [
+      "One prerendered page; the app mounts client-only (ssr: false)",
+      "No backend, API keys or runtime API calls; fonts and map data are bundled",
+      "Scene code loads lazily from the same origin; journey scenes are prefetched in the background"
+    ] },
+    { "dot": "cyan", "title": "Simulation loop", "items": [
+      "One rAF loop ticks the stage player, wafer twin, telemetry, FabSim, robot and control loops",
+      "Scenes are pure functions of player.view (phase, t), so scrubbing and stepping always agree",
+      "UI panels re-render at a fixed 2–20 Hz tick; no 60 fps state goes through React"
+    ] },
+    { "dot": "violet", "title": "Scroll story", "items": [
+      "One section per journey stage (55); the section on the reading line is the active stage",
+      "Scroll position inside a section scrubs that stage; the camera glides between its phase cues",
+      "Scene changes wait for the scroll to settle, behind a black veil"
+    ] },
+    { "dot": "amber", "title": "Rendering budget", "items": [
+      "Pixel ratio capped at 1.5 and adapted by a performance monitor, without shader recompiles",
+      "Static machine parts are merged into one mesh per finish, with one shadow caster per model",
+      "Only the active scene is mounted, chosen from stageId by the scene switcher"
+    ] },
+    { "dot": "rose", "title": "Boundaries and fallbacks", "items": [
+      "No WebGL (or ?mode=2d): a 2D view draws the same engine state instead of the 3D renderer",
+      "The remote assistant posts to NEXT_PUBLIC_ASSISTANT_ENDPOINT only when that is set; off by default",
+      "?stage= deep links open Explore directly at that stage"
+    ] }
+  ]
+}

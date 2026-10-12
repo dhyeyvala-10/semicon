@@ -100,6 +100,10 @@ SIA–BCG 2021, Natural Earth and others).
 
 ## Architecture
 
+A runtime architecture diagram (made with [Archify](https://github.com/tt-a1i/archify), every node linked to the source lines it describes) lives in
+[`.archify/architecture-fab-twin-runtime-20261012-074517/fab-twin-runtime.html`](.archify/architecture-fab-twin-runtime-20261012-074517/fab-twin-runtime.html) — open it in a browser.
+Its source is `candidate.json` next to it.
+
 ```
 app/                 Next.js App Router entry, global styles (green journey palette)
 components/

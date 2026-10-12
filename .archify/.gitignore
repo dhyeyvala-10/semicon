@@ -1,0 +1,10 @@
+# keep each diagram's source (candidate.json) and the rendered HTML; checker receipts and captures are local evidence
+*/visual-check/
+*/review-*/
+*.finalize.json
+*.finalize-summary.json
+*.browser-check.json
+*.deliver.json
+*.check.json
+*.receipt.json
+*.delivery.json
