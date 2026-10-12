@@ -12,10 +12,13 @@ import { useFrame } from '@react-three/fiber';
 import type { SceneProps } from '../SceneSwitcher';
 import { Lighting, CleanroomBay } from '../environments';
 import { M } from '../materials';
-import { B, C, GEO } from '../parts/primitives';
+import { GEO } from '../parts/primitives';
 import { Clickable, SensorIndicator, TechLabel } from '../parts/interaction';
 import { Inset, LiveProfile, ProfileSlab } from '../parts/section';
-import { ClusterTool, Pedestal, Showerhead, CHAMBER } from '../parts/cluster';
+import { ClusterTool, Pedestal, Showerhead, CHAMBER, useFolded, buildClusterNeighbour, rfCable } from '../parts/cluster';
+import { Kit, boltCircle, grille, ledStrip, type V3 } from '../kit/build';
+import { KM } from '../kit/finish';
+import { Baked } from '../kit/Baked';
 import { substrateWithTrench, filmOverTrench, TRENCH } from '../parts/profiles';
 import { Operator } from '../parts/people';
 import { engine } from '@/simulation/engine';
@@ -138,9 +141,116 @@ function ChamberParticles({ mode }: { mode: Mode }) {
   );
 }
 
+/* --------------------------------------------------------- lid hardware (static, merged) */
+
+const Z0: V3 = [0, 0, 0];
+const RX: V3 = [0, 0, Math.PI / 2];
+const RZ: V3 = [Math.PI / 2, 0, 0];
+/** top of the active chamber's lid (chamber-local) */
+const LID = 1.385;
+/** bead-blasted aluminium (matches the cluster's vacuum hardware) */
+const ALU = new THREE.MeshStandardMaterial({ color: '#c3c8cb', roughness: 0.78, metalness: 0.5, roughnessMap: KM.paint.roughnessMap });
+
+/** Fast-switching pneumatic diaphragm valve (body, bonnet, coloured actuator, pilot fitting). */
+function aldValve(k: Kit, pos: V3, cap: THREE.Material) {
+  const [x, y, z] = pos;
+  k.rbox(KM.stainless, [0.038, 0.026, 0.038], 0.004, [x, y + 0.013, z]);
+  k.cyl(KM.stainless, 0.012, 0.02, [x, y + 0.036, z], Z0, 16);
+  k.cyl(cap, 0.0155, 0.032, [x, y + 0.062, z], Z0, 18);
+  k.cyl(KM.anodizedDark, 0.0162, 0.004, [x, y + 0.08, z], Z0, 18, { cast: false });
+  k.cyl(KM.brass, 0.0035, 0.014, [x + 0.019, y + 0.068, z], RX, 8, { cast: false });
+}
+
+/**
+ * CVD / ALD lid: isolator and gas inlet manifold on the lid centre, a row of fast valves,
+ * the lid-mounted gas box on standoffs (MFCs behind a louvred cover), precursor lines
+ * dropping down the back, and the RF feed to the showerhead.
+ */
+function buildLidGas(k: Kit, ald: boolean) {
+  // isolator ring, inlet flange and manifold block
+  k.cyl(KM.ptfe, 0.075, 0.022, [0, LID + 0.011, 0], Z0, 36);
+  k.cyl(KM.stainless, 0.092, 0.012, [0, LID + 0.028, 0], Z0, 36);
+  boltCircle(k, 0.08, 8, LID + 0.035, 0.0055);
+  k.rbox(KM.stainless, [0.24, 0.042, 0.12], 0.006, [0, LID + 0.055, 0.01]);
+  k.box(KM.seam, [0.242, 0.003, 0.122], [0, LID + 0.046, 0.01], Z0, { cast: false });
+  // valve row on the manifold, towards the operator
+  const caps = ald ? [KM.paintBlue, KM.plasticWhite, KM.paintBlue, KM.plasticWhite, KM.paintYellow] : [KM.paintBlue, KM.paintBlue, KM.plasticWhite, KM.paintGraphite];
+  const n = caps.length;
+  for (let i = 0; i < n; i++) aldValve(k, [-0.1 + (0.2 * i) / (n - 1), LID + 0.076, 0.045], caps[i]);
+  k.label('tag', ald ? 'ALD VALVES' : 'GAS INLET', ald ? '≤ 10 ms · 4 LINES' : 'TEOS · O₂ · He', 0.12, 0.03, [0, LID + 0.058, 0.0712], Z0);
+  // lid-mounted gas box on four standoffs
+  const gy = LID + 0.09;
+  const gh = 0.17;
+  for (const [x, z] of [[-0.15, -0.03], [0.15, -0.03], [-0.15, -0.2], [0.15, -0.2]]) k.cyl(KM.stainless, 0.009, gy - LID, [x, LID + (gy - LID) / 2, z], Z0, 10);
+  k.rbox(KM.paint, [0.34, gh, 0.22], 0.012, [0, gy + gh / 2, -0.115]);
+  k.rbox(KM.paintGraphite, [0.348, 0.014, 0.228], 0.005, [0, gy + gh + 0.007, -0.115]);
+  k.box(KM.seam, [0.342, 0.003, 0.222], [0, gy + 0.03, -0.115], Z0, { cast: false });
+  grille(k, 0.14, 0.07, [-0.08, gy + 0.095, -0.0035], { m: KM.paint });
+  k.label('model', ald ? 'ALD-4' : 'GB-300', ald ? 'PULSE GAS BOX' : 'LID GAS BOX · 4 MFC', 0.13, 0.032, [0.08, gy + 0.125, -0.0045], Z0);
+  k.label('warn', 'TOXIC GAS', '', 0.045, 0.045, [0.08, gy + 0.065, -0.0045], Z0);
+  ledStrip(k, 0.1, [0.08, gy + 0.03 + 0.012, -0.002], KM.ledGreen);
+  for (const x of [-0.155, 0.155]) for (const y of [gy + 0.015, gy + gh - 0.015]) k.cyl(KM.stainlessDark, 0.005, 0.004, [x, y, -0.003], RZ, 8, { cast: false });
+  // precursor lines: up out of the gas box, back, and down the rear of the chamber
+  const gases: [string, string][] = ald ? [['TMA', '#7a4a8a'], ['H₂O', '#2f5d8a']] : [['TEOS', '#7a4a8a'], ['O₂', '#3e7d4c']];
+  gases.forEach(([g, c], i) => {
+    const x = 0.06 + i * 0.07;
+    const z = -0.08 - i * 0.06;
+    k.pipe(KM.stainless, [[x, gy + gh + 0.014, z], [x, gy + gh + 0.09, z], [x, gy + gh + 0.09, -0.6], [x, 0.02, -0.6]], 0.0065, 0.04);
+    k.cyl(KM.stainless, 0.013, 0.02, [x, gy + gh + 0.024, z], Z0, 14);
+    aldValve(k, [x, gy + gh + 0.09, -0.4], KM.paintBlue);
+    k.at([x, 1.05, -0.6], Math.PI, () => k.label('gas', g, '', 0.07, 0.016, [0, 0, 0.009], Z0, c));
+    k.box(KM.paintGraphite, [0.05, 0.004, 0.05], [x, 0.002, -0.6], Z0, { cast: false });
+  });
+  // RF feed to the showerhead: connector on the manifold, coax round the back
+  k.cyl(KM.stainless, 0.022, 0.04, [0.14, LID + 0.055, 0.01], RX, 16);
+  k.cyl(KM.stainlessDark, 0.026, 0.016, [0.165, LID + 0.055, 0.01], RX, 6);
+  rfCable(k, [0.17, LID + 0.055, 0.01], 0.014);
+  k.label('warn', 'RF', '', 0.04, 0.04, [0.12, LID + 0.055, 0.0712], Z0);
+}
+
+/**
+ * PVD lid: dark-space shield and bonded target (inside), insulator ring, water-cooled
+ * magnetron housing with a bolted cover, rotating-magnet drive, DC feed box and cables.
+ */
+function buildMagnetron(k: Kit) {
+  // inside the chamber (seen in the cut-away): grounded shield and backing plate
+  k.cyl(KM.stainlessDark, 0.224, 0.07, [0, 1.282, 0], Z0, 48, { open: true });
+  k.torus(KM.stainlessDark, 0.224, 0.004, [0, 1.247, 0], Z0, 48, { cast: false });
+  k.cyl(KM.copper, 0.206, 0.014, [0, 1.322, 0], Z0, 48);
+  // ceramic insulator and magnetron body on the lid
+  k.cyl(KM.ptfe, 0.235, 0.016, [0, LID + 0.008, 0], Z0, 56);
+  k.cyl(ALU, 0.215, 0.1, [0, LID + 0.066, 0], Z0, 56);
+  for (const y of [LID + 0.03, LID + 0.1]) k.torus(KM.seam, 0.2155, 0.0014, [0, y, 0], Z0, 56, { cast: false });
+  k.cyl(ALU, 0.226, 0.014, [0, LID + 0.123, 0], Z0, 56);
+  k.cyl(KM.stainless, 0.17, 0.006, [0, LID + 0.133, 0], Z0, 48);
+  boltCircle(k, 0.205, 16, LID + 0.132, 0.0058);
+  // rotating-magnet drive: gearbox, motor and encoder
+  k.rbox(KM.anodized, [0.12, 0.045, 0.1], 0.008, [0.05, LID + 0.158, 0.03]);
+  k.cyl(KM.paintGraphite, 0.042, 0.11, [0.05, LID + 0.235, 0.03], Z0, 24);
+  k.cyl(KM.anodizedDark, 0.044, 0.018, [0.05, LID + 0.299, 0.03], Z0, 24);
+  k.cyl(KM.plastic, 0.012, 0.02, [0.09, LID + 0.27, 0.03], RX, 12, { cast: false });
+  // DC power feed box with HV warning and the cathode cable
+  k.rbox(KM.paint, [0.15, 0.13, 0.14], 0.012, [-0.09, LID + 0.2, -0.07]);
+  k.rbox(KM.paintGraphite, [0.156, 0.012, 0.146], 0.004, [-0.09, LID + 0.27, -0.07]);
+  k.label('warn', 'HIGH VOLTAGE', '', 0.05, 0.05, [-0.12, LID + 0.2, 0.0006], Z0);
+  k.label('tag', 'DC CATHODE', '20 kW · ROTATING MAG', 0.13, 0.032, [0.05, LID + 0.085, 0.2162], Z0);
+  k.cyl(KM.stainless, 0.024, 0.04, [-0.17, LID + 0.2, -0.07], RX, 16);
+  rfCable(k, [-0.19, LID + 0.2, -0.07], 0.02, KM.rubber, -2.0);
+  // cooling water in / out on the housing side
+  for (const [i, m] of [[0, KM.paintBlue], [1, KM.paintRed]] as const) {
+    const z = -0.05 + i * 0.1;
+    const x = Math.sqrt(0.215 * 0.215 - z * z);
+    k.cyl(KM.brass, 0.01, 0.04, [x + 0.015, LID + 0.07, z], RX, 10, { cast: false });
+    rfCable(k, [x + 0.035, LID + 0.07, z], 0.011, m, (i - 0.5) * 0.46);
+  }
+}
+
 function ChamberInternals({ mode, gap }: { mode: Mode; gap: boolean }) {
   const film = useRef<THREE.Mesh>(null);
   const filmMat = useMemo(() => new THREE.MeshStandardMaterial({ color: '#8fb0a0', roughness: 0.1, metalness: 0.4, transparent: true, opacity: 0.9 }), []);
+  const ald = mode === 'ald';
+  const lidGas = useFolded((k) => buildLidGas(k, ald), [ald]);
+  const magnetron = useFolded(buildMagnetron);
   useFrame(() => {
     const nm = engine.tele.value('film', 0);
     if (!film.current) return;
@@ -165,18 +275,14 @@ function ChamberInternals({ mode, gap }: { mode: Mode; gap: boolean }) {
         <group>
           <Showerhead />
           <Clickable sel={{ kind: 'component', id: mode === 'ald' ? 'ald-chamber' : 'cvd-chamber', machine: 'dep-cluster', label: mode === 'ald' ? 'Fast-switching ALD valves / gas box' : 'Gas box & mass-flow controllers' }}>
-            <B s={[0.3, 0.22, 0.3]} m={M.panelWarm} position={[0, 1.55, 0]} />
-            {[-0.08, 0.08].map((z) => (
-              <C key={z} r={0.03} h={0.1} m={M.steel} position={[0.1, 1.71, z]} />
-            ))}
+            <Baked parts={lidGas} />
           </Clickable>
         </group>
       )}
       {mode === 'pvd' && (
         <Clickable sel={{ kind: 'component', id: 'pvd-chamber', machine: 'dep-cluster', label: 'Sputter target & magnetron' }}>
-          <C r={0.2} h={0.03} m={M.copper} position={[0, 1.3, 0]} />
-          <C r={0.21} h={0.12} m={M.panelGrey} position={[0, 1.4, 0]} />
-          <B s={[0.25, 0.18, 0.25]} m={M.panelDark} position={[0, 1.6, 0]} />
+          <mesh position={[0, 1.3, 0]} geometry={GEO.cyl} scale={[0.2, 0.03, 0.2]} material={M.copper} />
+          <Baked parts={magnetron} />
         </Clickable>
       )}
       <ChamberParticles mode={mode} />
@@ -238,18 +344,14 @@ function CompareStrip() {
   );
 }
 
+/** Neighbouring cluster tools along the bay (merged, background detail). */
 function NeighbourTools() {
-  return (
-    <>
-      {[-3.6, 3.6].map((z) => (
-        <group key={z} position={[0, 0, z]}>
-          <B s={[3.2, 0.7, 2.2]} m={M.panelDark} position={[0, 0.35, 0]} />
-          <C r={0.7} h={0.5} m={M.steel} position={[0, 0.98, 0]} />
-          <B s={[0.8, 2.0, 1.8]} m={M.panel} position={[-2.1, 1.0, 0]} />
-        </group>
-      ))}
-    </>
-  );
+  const parts = useFolded((k) => {
+    // each drops the closed chamber that would stand in the back wall / off the floor
+    k.at([0, 0, -3.9], 0, () => buildClusterNeighbour(k, M.blueAccent, 'etcher', [1]));
+    k.at([0, 0, 3.9], 0, () => buildClusterNeighbour(k, M.greenAccent, 'dep-cluster', [-1]));
+  });
+  return <Baked parts={parts} />;
 }
 
 export default function DepositionScene({ stage }: SceneProps) {
