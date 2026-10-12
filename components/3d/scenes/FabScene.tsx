@@ -17,11 +17,15 @@ import { Clickable, SensorIndicator, TechLabel } from '../parts/interaction';
 import { FOUP } from '../parts/wafer';
 import { Operator } from '../parts/people';
 import { Screen, clear, plot, bigNumber, SCR } from '../parts/screens';
-import { toolModel, matFor, towerPos } from '../fab/toolModels';
+import { buildFabTools, towerPos, atlasLabel, rbGeo, FM } from '../fab/toolModels';
+import { KM, aoMaterial } from '../kit/finish';
+import { Kit, grille } from '../kit/build';
+import { Baked, useKit } from '../kit/Baked';
+import { shadowOnly } from '../kit/shadow';
 import { FabInfrastructure } from '../fab/FabInfrastructure';
-import { TOOLS, BAYS, FAB, BAY_X, OHT_LOOP, localToWorld, type ToolType, type ToolInstance } from '@/data/fabLayout';
+import { TOOLS, BAYS, FAB, BAY_X, OHT_LOOP, localToWorld, type ToolInstance } from '@/data/fabLayout';
 import { engine } from '@/simulation/engine';
-import { loopPoint, PORT_HEIGHT, FAB_TIME_COMPRESSION } from '@/simulation/fab';
+import { loopPoint, PORT_HEIGHT, FAB_TIME_COMPRESSION, type Vehicle } from '@/simulation/fab';
 import { useUI } from '@/lib/store';
 import { track, hoverState, cameraDriver } from '@/lib/runtime';
 import { fmt, rng } from '@/lib/math';
@@ -32,6 +36,75 @@ const W = FAB.maxX - FAB.minX;
 const D = FAB.maxZ - FAB.minZ;
 
 /* ---------------------------------------------------------------- shell */
+
+const FFU_FACE = new THREE.PlaneGeometry(1, 1).rotateX(Math.PI / 2);
+
+/** Cleanroom wall system: modular panels with seams, stainless cove base, return-air grilles. */
+function wallRun(k: Kit, len: number, both: boolean, grilles: boolean) {
+  const H = FAB.ceiling;
+  const nc = { shell: true, cast: false };
+  const n = Math.max(1, Math.round(len / 1.2));
+  for (const s of both ? [1, -1] : [1]) {
+    const z = s * 0.077;
+    for (let i = 1; i < n; i++) k.box(KM.seam, [0.006, H - 0.2, 0.004], [-len / 2 + (i * len) / n, H / 2 + 0.05, z], [0, 0, 0], nc);
+    k.box(KM.seam, [len, 0.006, 0.004], [0, 2.4, z], [0, 0, 0], nc);
+    k.box(FM.steel, [len, 0.1, 0.02], [0, 0.05, s * 0.085], [0, 0, 0], nc);
+    k.box(KM.seam, [len, 0.004, 0.022], [0, 0.102, s * 0.085], [0, 0, 0], nc);
+    if (grilles) for (let x = -len / 2 + 2.4; x < len / 2 - 1; x += 4.8) k.at([x, 0, 0], s > 0 ? 0 : Math.PI, () => grille(k, 0.8, 0.3, [0, 0.38, 0.079], { m: KM.paint, pitch: 0.04, shell: true, cast: false }));
+  }
+}
+
+function buildFabShell(k: Kit) {
+  const H = FAB.ceiling;
+  const sh = { shell: true };
+  // perimeter walls (interior faces detailed)
+  const walls: { pos: [number, number, number]; yaw: number; len: number }[] = [
+    { pos: [0, 0, FAB.minZ], yaw: 0, len: W },
+    { pos: [0, 0, FAB.maxZ], yaw: Math.PI, len: W },
+    { pos: [FAB.minX, 0, 0], yaw: Math.PI / 2, len: D },
+    { pos: [FAB.maxX, 0, 0], yaw: -Math.PI / 2, len: D },
+  ];
+  for (const w of walls)
+    k.at(w.pos, w.yaw, () => {
+      k.box(KM.paint, [w.len, H, 0.15], [0, H / 2, 0], [0, 0, 0], sh);
+      wallRun(k, w.len, false, true);
+    });
+  // chase walls between back-to-back tool rows, with stainless corner guards at the spine end
+  for (const x of BAY_X.slice(0, -1))
+    for (const side of [1, -1]) {
+      const len = FAB.bayEnd - FAB.bayStart + 0.6;
+      k.at([x + 7, 0, (side * (FAB.bayStart + FAB.bayEnd)) / 2], Math.PI / 2, () => {
+        k.box(KM.paint, [len, H, 0.12], [0, H / 2, 0], [0, 0, 0], sh);
+        wallRun(k, len, true, false);
+        k.box(FM.steel, [0.03, 1.6, 0.16], [-side * (len / 2 + 0.005), 0.8, 0], [0, 0, 0], sh);
+      });
+    }
+  // clad structural columns along the spine: kick guard, EMO station facing the spine
+  for (const x of BAY_X)
+    for (const z of [3.1, -3.1]) {
+      const cx = x + 7;
+      const s = -Math.sign(z);
+      k.rbox(KM.paint, [0.45, H, 0.45], 0.04, [cx, H / 2, z], [0, 0, 0], sh);
+      k.rbox(FM.steel, [0.47, 0.12, 0.47], 0.01, [cx, 0.06, z]);
+      k.at([cx, 0, z + s * 0.226], s > 0 ? 0 : Math.PI, () => {
+        k.rbox(KM.paintRed, [0.16, 0.22, 0.04], 0.01, [0, 1.45, 0.02]);
+        k.cyl(KM.paintYellow, 0.04, 0.02, [0, 1.43, 0.05], [Math.PI / 2, 0, 0], 16, { cast: false });
+        k.cyl(KM.paintRed, 0.026, 0.03, [0, 1.43, 0.07], [Math.PI / 2, 0, 0], 16, { cast: false });
+        atlasLabel(k, 'emo', 0.16, 0.04, [0, 1.62, 0.041]);
+      });
+    }
+  // bay entrance signs hanging over the spine edge, facing the spine
+  for (const b of BAYS)
+    // above the OHT rail band, so the follow camera passes under them
+    k.at([b.x, 4.6, b.side * 3.2], b.side > 0 ? Math.PI : 0, () => {
+      k.rbox(KM.paintGraphite, [1.42, 0.42, 0.05], 0.015, [0, 0, 0]);
+      atlasLabel(k, `bay:${b.id}`, 1.32, 0.33, [0, 0.01, 0.026]);
+      k.box(b.light === 'amber' ? KM.ledAmber : KM.ledGreen, [1.3, 0.012, 0.004], [0, -0.19, 0.026], [0, 0, 0], { cast: false });
+      for (const x of [-0.55, 0.55]) k.cyl(FM.steelDark, 0.006, H - 4.81, [x, (H - 4.6 + 0.21) / 2, 0], [0, 0, 0], 6, { cast: false });
+    });
+  // spine identification sign at the west end
+  k.at([FAB.minX + 0.08, 3.2, 0], Math.PI / 2, () => atlasLabel(k, 'spine', 1.6, 0.4, [0, 0, 0]));
+}
 
 function FabShell() {
   const view = useUI((s) => s.view);
@@ -50,13 +123,14 @@ function FabShell() {
     const mat = new THREE.MeshStandardMaterial({ map: ffuPanel(), roughness: 0.85, side: THREE.DoubleSide });
     const cols = Math.floor(W / 1.2);
     const rows = Math.floor(D / 1.2);
-    const m = new THREE.InstancedMesh(GEO.box, mat, cols * rows);
+    // FFU faces are only seen from below (the ceiling hides when the camera rises above it)
+    const m = new THREE.InstancedMesh(FFU_FACE, mat, cols * rows);
     const o = new THREE.Object3D();
     let i = 0;
     for (let r = 0; r < rows; r++)
       for (let c = 0; c < cols; c++) {
-        o.position.set(FAB.minX + 0.6 + c * 1.2, FAB.ceiling, FAB.minZ + 0.6 + r * 1.2);
-        o.scale.set(1.17, 0.05, 1.17);
+        o.position.set(FAB.minX + 0.6 + c * 1.2, FAB.ceiling - 0.025, FAB.minZ + 0.6 + r * 1.2);
+        o.scale.set(1.17, 1, 1.17);
         o.updateMatrix();
         m.setMatrixAt(i++, o.matrix);
       }
@@ -100,7 +174,7 @@ function FabShell() {
       amberStrips.visible = v;
     }
   });
-  const wallMat = view === 'xray' ? XRAY : M.panel;
+  const room = useKit(buildFabShell);
   return (
     <group>
       <Clickable sel={{ kind: 'component', id: 'raised-floor', label: 'Perforated raised floor' }}>
@@ -119,21 +193,8 @@ function FabShell() {
       </Clickable>
       <primitive object={strips} />
       <primitive object={amberStrips} />
-      {/* perimeter walls */}
-      <B s={[W, FAB.ceiling, 0.15]} m={wallMat} position={[0, FAB.ceiling / 2, FAB.minZ]} />
-      <B s={[W, FAB.ceiling, 0.15]} m={wallMat} position={[0, FAB.ceiling / 2, FAB.maxZ]} />
-      <B s={[0.15, FAB.ceiling, D]} m={wallMat} position={[FAB.minX, FAB.ceiling / 2, 0]} />
-      <B s={[0.15, FAB.ceiling, D]} m={wallMat} position={[FAB.maxX, FAB.ceiling / 2, 0]} />
-      {/* chase walls between back-to-back tool rows */}
-      {BAY_X.slice(0, -1).map((x) =>
-        [1, -1].map((side) => (
-          <B key={`${x}:${side}`} s={[0.12, FAB.ceiling, FAB.bayEnd - FAB.bayStart + 0.6]} m={wallMat} position={[x + 7, FAB.ceiling / 2, side * (FAB.bayStart + FAB.bayEnd) / 2]} />
-        )),
-      )}
-      {/* structural columns along the spine */}
-      {BAY_X.map((x) =>
-        [3.1, -3.1].map((z) => <B key={`${x}:${z}`} s={[0.45, FAB.ceiling, 0.45]} m={M.panel} position={[x + 7, FAB.ceiling / 2, z]} />),
-      )}
+      {/* perimeter walls, chase walls, clad columns, bay signs (one mesh per finish) */}
+      <Baked parts={room} view={view === 'xray' ? 'xray' : 'normal'} />
       {/* amber floor wash in litho bays (yellow-light zone) */}
       {BAYS.filter((b) => b.light === 'amber').map((b) => (
         <group key={b.id}>
@@ -150,46 +211,55 @@ function FabShell() {
 
 /* ---------------------------------------------------------------- tools */
 
-const TYPES: ToolType[] = ['litho', 'etch', 'dep', 'furnace', 'implant', 'rtp', 'cmp', 'metro', 'wet', 'stocker'];
+const noRay = () => {};
+const PICK_MAT = new THREE.MeshBasicMaterial();
 
-function ToolGroup({ type, tools }: { type: ToolType; tools: ToolInstance[] }) {
+/**
+ * All ~66 tools: every finish is merged across the whole fab (one draw call per finish),
+ * one shadow-only caster, invisible instanced pick boxes for selection / hover, and one
+ * instanced signal-lamp mesh coloured from simulation state.
+ */
+function Tools() {
   const view = useUI((s) => s.view);
   const select = useUI((s) => s.select);
-  const model = useMemo(() => toolModel(type, tools[0].length, tools[0].depth), [type, tools]);
-  const meshes = useMemo(() => {
-    const out: THREE.InstancedMesh[] = [];
+  const fab = useMemo(() => buildFabTools(TOOLS), []);
+  useEffect(
+    () => () => {
+      fab.parts.forEach((p) => p.geometry.dispose());
+      fab.caster?.dispose();
+    },
+    [fab],
+  );
+  const caster = useMemo(() => (fab.caster ? shadowOnly(fab.caster) : null), [fab]);
+  const ao = useMemo(() => aoMaterial(), []);
+  const pick = useMemo(() => {
+    const m = new THREE.InstancedMesh(GEO.box, PICK_MAT, TOOLS.length);
     const o = new THREE.Object3D();
-    for (const [k, geo] of model) {
-      const mesh = new THREE.InstancedMesh(geo, matFor(k), tools.length);
-      mesh.userData.matKey = k;
-      tools.forEach((t, i) => {
-        o.position.set(t.x, 0, t.z);
-        o.rotation.set(0, t.rot, 0);
-        o.updateMatrix();
-        mesh.setMatrixAt(i, o.matrix);
-      });
-      mesh.instanceMatrix.needsUpdate = true;
-      mesh.castShadow = k !== 'glass' && k !== 'screen';
-      mesh.receiveShadow = true;
-      mesh.computeBoundingSphere();
-      out.push(mesh);
-    }
-    return out;
-  }, [model, tools]);
-  useEffect(() => {
-    for (const m of meshes) {
-      const k = m.userData.matKey as string;
-      const shellKey = k === 'panel' || k === 'panelWarm' || k === 'panelGrey' || k === 'louvre' || k === 'glass';
-      m.material = view === 'xray' && shellKey ? XRAY : matFor(k as never);
-    }
-  }, [view, meshes]);
+    const c = new THREE.Vector3();
+    const sz = new THREE.Vector3();
+    TOOLS.forEach((t, i) => {
+      const b = fab.bounds[i];
+      b.getCenter(c);
+      b.getSize(sz);
+      const w = localToWorld(t.x, t.z, t.rot, c.x, c.z);
+      o.position.set(w.x, c.y, w.z);
+      o.rotation.set(0, t.rot, 0);
+      o.scale.copy(sz);
+      o.updateMatrix();
+      m.setMatrixAt(i, o.matrix);
+    });
+    m.instanceMatrix.needsUpdate = true;
+    m.computeBoundingSphere();
+    m.visible = false;
+    return m;
+  }, [fab]);
 
   // signal tower lamps (instanced, coloured from simulation state)
   const lamps = useMemo(() => {
-    const m = new THREE.InstancedMesh(GEO.cyl, new THREE.MeshStandardMaterial({ color: '#ffffff', emissive: '#ffffff', emissiveIntensity: 0.9, roughness: 0.4, toneMapped: false }), tools.length);
+    const m = new THREE.InstancedMesh(GEO.cylLow, new THREE.MeshStandardMaterial({ color: '#ffffff', emissive: '#ffffff', emissiveIntensity: 0.9, roughness: 0.4, toneMapped: false }), TOOLS.length);
     const o = new THREE.Object3D();
-    tools.forEach((t, i) => {
-      const [lx, ly, lz] = towerPos(type, t.length, t.depth);
+    TOOLS.forEach((t, i) => {
+      const [lx, ly, lz] = towerPos(t.type, t.length, t.depth);
       const w = localToWorld(t.x, t.z, t.rot, lx, lz);
       o.position.set(w.x, ly + 0.2, w.z);
       o.scale.set(0.045, 0.32, 0.045);
@@ -198,12 +268,14 @@ function ToolGroup({ type, tools }: { type: ToolType; tools: ToolInstance[] }) {
       m.setColorAt(i, new THREE.Color('#5fbf5a'));
     });
     m.instanceMatrix.needsUpdate = true;
+    m.computeBoundingSphere();
+    m.raycast = noRay;
     return m;
-  }, [tools, type]);
+  }, []);
   const col = useMemo(() => new THREE.Color(), []);
   useFrame(({ clock }) => {
     const blink = Math.sin(clock.elapsedTime * 7) > 0;
-    tools.forEach((t, i) => {
+    TOOLS.forEach((t, i) => {
       const s = engine.fab.toolById[t.id]?.state ?? 'IDLE';
       const c = s === 'ALARM' && !blink ? '#3a1a18' : STATE_COLOR[s];
       lamps.setColorAt(i, col.set(c));
@@ -215,13 +287,13 @@ function ToolGroup({ type, tools }: { type: ToolType; tools: ToolInstance[] }) {
     e.stopPropagation();
     const i = e.instanceId;
     if (i === undefined) return;
-    select({ kind: 'tool', id: tools[i].id, label: tools[i].id });
+    select({ kind: 'tool', id: TOOLS[i].id, label: TOOLS[i].id });
   };
   const onOver = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
     const i = e.instanceId;
     if (i === undefined) return;
-    const t = tools[i];
+    const t = TOOLS[i];
     hoverState.label = `${t.id} · ${engine.fab.toolById[t.id]?.state ?? ''}`;
     hoverState.kind = 'TOOL';
     hoverState.version++;
@@ -234,22 +306,13 @@ function ToolGroup({ type, tools }: { type: ToolType; tools: ToolInstance[] }) {
   };
   return (
     <group>
-      {meshes.map((m, i) => (
-        <primitive key={i} object={m} onClick={onClick} onPointerOver={onOver} onPointerOut={onOut} />
+      {fab.parts.map((p, i) => (
+        <mesh key={i} geometry={p.geometry} material={view === 'xray' && p.shell ? XRAY : p.material} renderOrder={p.material === ao ? 2 : 0} receiveShadow raycast={noRay} />
       ))}
+      {caster && <primitive object={caster} />}
+      <primitive object={pick} onClick={onClick} onPointerOver={onOver} onPointerOut={onOut} />
       <primitive object={lamps} />
     </group>
-  );
-}
-
-function Tools() {
-  const groups = useMemo(() => TYPES.map((type) => ({ type, tools: TOOLS.filter((t) => t.type === type) })).filter((g) => g.tools.length), []);
-  return (
-    <>
-      {groups.map((g) => (
-        <ToolGroup key={g.type} type={g.type} tools={g.tools} />
-      ))}
-    </>
   );
 }
 
@@ -313,63 +376,115 @@ function Footprint({ t, color }: { t: ToolInstance; color: string }) {
 
 /* ---------------------------------------------------------------- OHT */
 
-function Rail() {
-  const geo = useMemo(() => {
-    const parts: THREE.BufferGeometry[] = [];
-    const n = OHT_LOOP.length;
-    for (let i = 0; i < n; i++) {
-      const a = OHT_LOOP[i];
-      const b = OHT_LOOP[(i + 1) % n];
-      const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
-      const g = new THREE.BoxGeometry(len + 0.12, 0.1, 0.14);
-      g.rotateY(Math.atan2(-(b[1] - a[1]), b[0] - a[0]));
-      g.translate((a[0] + b[0]) / 2, FAB.ohtY + 0.14, (a[1] + b[1]) / 2);
-      parts.push(g);
-      // hangers
-      const k = Math.floor(len / 3.5);
-      for (let j = 0; j <= k; j++) {
-        const t = k ? j / k : 0.5;
-        const h = new THREE.BoxGeometry(0.03, FAB.ceiling - FAB.ohtY - 0.18, 0.03);
-        h.translate(a[0] + (b[0] - a[0]) * t, (FAB.ceiling + FAB.ohtY + 0.18) / 2, a[1] + (b[1] - a[1]) * t);
-        parts.push(h);
+/** OHT track: extruded aluminium box rail with running lips, feeder line, joints and hanger rods. */
+function buildRail(k: Kit) {
+  const n = OHT_LOOP.length;
+  const Y = FAB.ohtY + 0.14;
+  const nc = { cast: false };
+  for (let i = 0; i < n; i++) {
+    const a = OHT_LOOP[i];
+    const b = OHT_LOOP[(i + 1) % n];
+    const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    const yaw = Math.atan2(-(b[1] - a[1]), b[0] - a[0]);
+    const L = len + 0.24;
+    k.at([(a[0] + b[0]) / 2, Y, (a[1] + b[1]) / 2], yaw, () => {
+      k.box(FM.alu, [L, 0.02, 0.24], [0, 0.05, 0]);
+      for (const s of [-1, 1]) {
+        k.box(FM.alu, [L, 0.12, 0.012], [0, -0.01, s * 0.114], [0, 0, 0], nc);
+        k.box(FM.aluDark, [L, 0.012, 0.06], [0, -0.064, s * 0.084], [0, 0, 0], nc);
       }
+      k.box(KM.paintGraphite, [len, 0.03, 0.016], [0, 0, 0.128], [0, 0, 0], nc);
+      const nj = Math.floor(len / 3);
+      for (let j = 1; j <= nj; j++) k.box(KM.seam, [0.006, 0.124, 0.252], [-len / 2 + (j * len) / (nj + 1), -0.01, 0], [0, 0, 0], nc);
+    });
+    const kk = Math.floor(len / 3.5);
+    for (let j = 0; j <= kk; j++) {
+      const t = kk ? j / kk : 0.5;
+      k.at([a[0] + (b[0] - a[0]) * t, 0, a[1] + (b[1] - a[1]) * t], yaw, () => {
+        k.box(KM.paintGraphite, [0.05, 0.03, 0.34], [0, Y + 0.075, 0], [0, 0, 0], nc);
+        k.box(KM.paintGraphite, [0.06, 0.04, 0.4], [0, FAB.ceiling - 0.045, 0], [0, 0, 0], nc);
+        const y0 = Y + 0.09;
+        const y1 = FAB.ceiling - 0.065;
+        for (const s of [-1, 1]) k.cyl(FM.steelDark, 0.008, y1 - y0, [0, (y0 + y1) / 2, s * 0.15], [0, 0, 0], 6, nc);
+      });
     }
-    return mergeAll(parts) ?? new THREE.BufferGeometry();
-  }, []);
+  }
+}
+
+function Rail() {
+  const parts = useKit(buildRail);
   return (
     <Clickable sel={{ kind: 'robot', id: 'oht', label: 'Overhead hoist transport (rail)' }}>
-      <mesh geometry={geo} material={M.steelDark} />
+      <Baked parts={parts} />
     </Clickable>
   );
 }
 
-function mergeAll(parts: THREE.BufferGeometry[]) {
-  return mergeGeometries(parts, false);
+/** One merged geometry from a kit build (all parts share the caller's single material). */
+function kitGeometry(fn: (k: Kit) => void) {
+  const k = new Kit();
+  fn(k);
+  const parts = k.build();
+  const g = parts.length === 1 ? parts[0].geometry : mergeGeometries(parts.map((p) => p.geometry), false)!;
+  if (parts.length > 1) parts.forEach((p) => p.geometry.dispose());
+  return g;
 }
 
-const vehBody = new THREE.MeshStandardMaterial({ color: '#e9eae6', roughness: 0.45, metalness: 0.15 });
-const vehDark = new THREE.MeshStandardMaterial({ color: '#30353a', roughness: 0.5, metalness: 0.4 });
+/** OHT vehicle body (vehicle frame: origin at rail level, +x = travel direction), by finish. */
+function vehicleParts() {
+  const nc = { cast: false };
+  const shell = kitGeometry((k) => {
+    k.add(KM.plasticWhite, rbGeo(0.94, 0.17, 0.64, 0.035), [0, -0.03, 0]);
+    for (const s of [-1, 1]) k.add(KM.plasticWhite, rbGeo(0.92, 0.55, 0.035, 0.012), [0, -0.38, s * 0.3]);
+  });
+  const dark = kitGeometry((k) => {
+    for (const s of [-1, 1]) {
+      k.box(KM.paintGraphite, [0.025, 0.07, 0.5], [s * 0.482, -0.03, 0], [0, 0, 0], nc);
+      k.box(KM.paintGraphite, [0.004, 0.5, 0.004], [0.18, -0.38, s * 0.3185], [0, 0, 0], nc);
+      k.box(KM.paintGraphite, [0.86, 0.004, 0.004], [0, -0.13, s * 0.3185], [0, 0, 0], nc);
+    }
+    k.box(KM.paintGraphite, [0.3, 0.09, 0.05], [0, 0.075, 0]);
+    k.box(KM.paintGraphite, [0.6, 0.05, 0.13], [0, 0.125, 0]);
+    for (const x of [-0.22, 0.22]) for (const s of [-1, 1]) k.cyl(KM.paintGraphite, 0.035, 0.03, [x, 0.115, s * 0.075], [Math.PI / 2, 0, 0], 10, nc);
+  });
+  const accent = kitGeometry((k) => {
+    for (const s of [-1, 1]) k.box(KM.paintAccent, [0.9, 0.022, 0.003], [0, -0.2, s * 0.319], [0, 0, 0], nc);
+  });
+  const led = kitGeometry((k) => {
+    for (const s of [-1, 1]) k.box(KM.ledAmber, [0.62, 0.01, 0.003], [0, -0.62, s * 0.319], [0, 0, 0], nc);
+  });
+  const grip = kitGeometry((k) => {
+    k.add(KM.paintGraphite, rbGeo(0.34, 0.03, 0.34, 0.008), [0, 0, 0]);
+    k.box(KM.paintGraphite, [0.12, 0.04, 0.12], [0, 0.03, 0]);
+    for (const a of [0, 2.09, 4.19]) k.box(KM.paintGraphite, [0.03, 0.05, 0.03], [Math.cos(a) * 0.11, -0.035, Math.sin(a) * 0.11], [0, 0, 0], nc);
+  });
+  return { shell, dark, accent, led, grip };
+}
 
 function Vehicles() {
   const N = engine.fab.vehicles.length;
-  const { top, side, trolley, grip, belt } = useMemo(() => {
-    const mk = (geo: THREE.BufferGeometry, mat: THREE.Material, n: number) => {
-      const m = new THREE.InstancedMesh(geo, mat, n);
-      m.castShadow = true;
+  const geo = useMemo(vehicleParts, []);
+  useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo]);
+  const { body, dark, accent, led, grip, belt } = useMemo(() => {
+    const mk = (g: THREE.BufferGeometry, mat: THREE.Material, n: number, cast = false) => {
+      const m = new THREE.InstancedMesh(g, mat, n);
+      m.castShadow = cast;
       m.frustumCulled = false;
       return m;
     };
     return {
-      top: mk(GEO.box, vehBody, N),
-      side: mk(GEO.box, vehBody, N * 2),
-      trolley: mk(GEO.box, vehDark, N),
-      grip: mk(GEO.box, vehDark, N),
-      belt: mk(GEO.box, vehDark, N * 2),
+      body: mk(geo.shell, KM.plasticWhite, N, true),
+      dark: mk(geo.dark, KM.paintGraphite, N),
+      accent: mk(geo.accent, KM.paintAccent, N),
+      led: mk(geo.led, KM.ledAmber, N),
+      grip: mk(geo.grip, KM.paintGraphite, N),
+      belt: mk(GEO.box, KM.rubber, N * 2),
     };
-  }, [N]);
+  }, [N, geo]);
   const o = useMemo(() => new THREE.Object3D(), []);
   const q = useMemo(() => new THREE.Quaternion(), []);
   const up = useMemo(() => new THREE.Vector3(0, 1, 0), []);
+  const off = useMemo(() => new THREE.Vector3(), []);
   useFrame(() => {
     const vs = engine.fab.vehicles;
     const stowY = FAB.ohtY - 0.62;
@@ -377,31 +492,33 @@ function Vehicles() {
       const p = loopPoint(v.s);
       q.setFromAxisAngle(up, p.dir);
       const set = (m: THREE.InstancedMesh, idx: number, lx: number, y: number, lz: number, sx: number, sy: number, sz: number) => {
-        const off = new THREE.Vector3(lx, 0, lz).applyQuaternion(q);
+        off.set(lx, 0, lz).applyQuaternion(q);
         o.position.set(p.x + off.x, y, p.z + off.z);
         o.quaternion.copy(q);
         o.scale.set(sx, sy, sz);
         o.updateMatrix();
         m.setMatrixAt(idx, o.matrix);
       };
-      set(top, i, 0, FAB.ohtY - 0.03, 0, 0.92, 0.16, 0.62);
-      set(side, i * 2, 0, FAB.ohtY - 0.38, 0.3, 0.92, 0.55, 0.03);
-      set(side, i * 2 + 1, 0, FAB.ohtY - 0.38, -0.3, 0.92, 0.55, 0.03);
-      set(trolley, i, 0, FAB.ohtY + 0.1, 0, 0.6, 0.12, 0.2);
+      // rigid body parts share one matrix (frame at rail level)
+      set(body, i, 0, FAB.ohtY, 0, 1, 1, 1);
+      dark.setMatrixAt(i, o.matrix);
+      accent.setMatrixAt(i, o.matrix);
+      led.setMatrixAt(i, o.matrix);
       const foupBottom = stowY - v.hoist * (stowY - PORT_HEIGHT);
       const gy = foupBottom + 0.38;
-      set(grip, i, 0, gy, 0, 0.34, 0.03, 0.34);
+      set(grip, i, 0, gy, 0, 1, 1, 1);
       const len = Math.max(0.01, FAB.ohtY - 0.12 - gy);
       set(belt, i * 2, 0.12, gy + len / 2, 0, 0.012, len, 0.03);
       set(belt, i * 2 + 1, -0.12, gy + len / 2, 0, 0.012, len, 0.03);
     });
-    for (const m of [top, side, trolley, grip, belt]) m.instanceMatrix.needsUpdate = true;
+    for (const m of [body, dark, accent, led, grip, belt]) m.instanceMatrix.needsUpdate = true;
   });
   return (
     <Clickable sel={{ kind: 'robot', id: 'oht', label: 'OHT vehicle' }}>
-      <primitive object={top} />
-      <primitive object={side} />
-      <primitive object={trolley} />
+      <primitive object={body} />
+      <primitive object={dark} />
+      <primitive object={accent} />
+      <primitive object={led} />
       <primitive object={grip} />
       <primitive object={belt} />
     </Clickable>
@@ -413,17 +530,32 @@ function Vehicles() {
 const foupBodyMat = new THREE.MeshStandardMaterial({ color: '#c5ccd0', roughness: 0.35, metalness: 0.05, transparent: true, opacity: 0.85 });
 function Foups() {
   const MAX = 48;
+  // FOUP shell with side handles, and the robotic handling flange on its neck (real size)
+  const geo = useMemo(
+    () => ({
+      body: kitGeometry((k) => {
+        k.add(KM.paint, rbGeo(0.39, 0.33, 0.34, 0.03), [0, 0, 0]);
+        for (const s of [-1, 1]) k.box(KM.paint, [0.2, 0.035, 0.025], [0, 0.04, s * 0.18]);
+      }),
+      lid: kitGeometry((k) => {
+        k.box(KM.paint, [0.1, 0.025, 0.1], [0, -0.0175, 0]);
+        k.add(KM.paint, rbGeo(0.2, 0.014, 0.2, 0.005), [0, 0.005, 0]);
+      }),
+    }),
+    [],
+  );
+  useEffect(() => () => Object.values(geo).forEach((g) => g.dispose()), [geo]);
   const body = useMemo(() => {
-    const m = new THREE.InstancedMesh(GEO.box, foupBodyMat, MAX);
+    const m = new THREE.InstancedMesh(geo.body, foupBodyMat, MAX);
     m.frustumCulled = false;
     m.castShadow = true;
     return m;
-  }, []);
+  }, [geo]);
   const lid = useMemo(() => {
-    const m = new THREE.InstancedMesh(GEO.box, M.foupDark, MAX);
+    const m = new THREE.InstancedMesh(geo.lid, M.foupDark, MAX);
     m.frustumCulled = false;
     return m;
-  }, []);
+  }, [geo]);
   const followed = useRef<THREE.Group>(null);
   const o = useMemo(() => new THREE.Object3D(), []);
   useFrame(() => {
@@ -442,11 +574,10 @@ function Foups() {
       if (n >= MAX) break;
       o.position.set(p.x, p.y + 0.165, p.z);
       o.rotation.set(0, 0, 0);
-      o.scale.set(0.39, 0.33, 0.34);
+      o.scale.set(1, 1, 1);
       o.updateMatrix();
       body.setMatrixAt(n, o.matrix);
       o.position.set(p.x, p.y + 0.36, p.z);
-      o.scale.set(0.2, 0.03, 0.2);
       o.updateMatrix();
       lid.setMatrixAt(n, o.matrix);
       n++;
@@ -532,6 +663,23 @@ function Particles() {
   }, []);
   const landedCount = useRef(0);
   const o = useMemo(() => new THREE.Object3D(), []);
+  const cart = useKit(
+    (k) =>
+      k.at([wafer.x, 0, wafer.z], 0, () => {
+        for (const [x, z] of [[-0.22, -0.22], [0.22, -0.22], [-0.22, 0.22], [0.22, 0.22]] as const) {
+          k.cyl(FM.steel, 0.012, 0.82, [x, 0.49, z], [0, 0, 0], 8);
+          k.cyl(KM.rubber, 0.03, 0.025, [x, 0.03, z], [Math.PI / 2, 0, 0], 12, { cast: false });
+          k.box(FM.steelDark, [0.03, 0.02, 0.04], [x, 0.06, z], [0, 0, 0], { cast: false });
+        }
+        k.rbox(FM.steel, [0.5, 0.025, 0.5], 0.008, [0, 0.89, 0]);
+        k.rbox(FM.steel, [0.5, 0.02, 0.5], 0.008, [0, 0.25, 0]);
+        k.cyl(KM.ptfe, 0.05, 0.05, [0, 0.925, 0], [0, 0, 0], 16);
+        k.pipe(FM.steel, [[-0.25, 0.9, -0.2], [-0.33, 1.0, -0.2], [-0.33, 1.0, 0.2], [-0.25, 0.9, 0.2]], 0.011, 0.04);
+        k.label('tag', 'MONITOR WAFER', 'PARTICLE WITNESS', 0.16, 0.04, [0, 0.89, 0.2505], [0, 0, 0]);
+        k.ao(0.55, 0.55, [0, 0, 0], 1.3);
+      }),
+    [wafer],
+  );
   useFrame((_, dt) => {
     let landed = 0;
     state.forEach((s, i) => {
@@ -570,8 +718,8 @@ function Particles() {
     <group>
       <primitive object={mesh} />
       <Operator position={[-14, 0, -1.2]} rotation={Math.PI / 2} still />
-      {/* monitor wafer on a cart */}
-      <B s={[0.5, 0.9, 0.5]} m={M.steel} position={[wafer.x, 0.45, wafer.z]} />
+      {/* monitor wafer on a stainless cleanroom cart */}
+      <Baked parts={cart} />
       <mesh position={[wafer.x, wafer.y, wafer.z]}>
         <cylinderGeometry args={[0.15, 0.15, 0.002, 48]} />
         <meshStandardMaterial color="#8f97a3" metalness={0.9} roughness={0.08} />
@@ -590,8 +738,18 @@ function Particles() {
 /* ---------------------------------------------------------------- displays */
 
 function SpineScreens() {
+  // ceiling-hung display housings behind the two live screens
+  const mounts = useKit((k) => {
+    for (const [x, z, s] of [[-7, 2.9, 1], [7, -2.9, -1]] as const)
+      k.at([x, 3.5, z + s * 0.06], 0, () => {
+        k.rbox(KM.paintGraphite, [2.5, 1.3, 0.07], 0.02, [0, 0, 0]);
+        k.box(FM.aluDark, [1.6, 0.06, 0.04], [0, 0.64, s * 0.05]);
+        for (const xx of [-0.7, 0.7]) k.cyl(FM.steelDark, 0.012, FAB.ceiling - 4.17, [xx, (FAB.ceiling - 3.5 + 0.67) / 2, s * 0.05], [0, 0, 0], 8, { cast: false });
+      });
+  });
   return (
     <>
+      <Baked parts={mounts} />
       <Screen
         size={[2.4, 1.2]}
         position={[-7, 3.5, 2.9]}
@@ -630,11 +788,15 @@ function SpineScreens() {
 
 /* ---------------------------------------------------------------- intro camera */
 
+const busy = (v: Vehicle) => v.target !== null || v.phase !== 'idle';
+
 function IntroCamera() {
   const started = useUI((s) => s.started);
   const controls = useThree((s) => s.controls) as unknown as OrbitControlsImpl | null;
   const camera = useThree((s) => s.camera);
   const pick = useRef(0);
+  const idleFor = useRef(0);
+  const cut = useRef(false);
   const look = useMemo(() => new THREE.Vector3(), []);
   const pos = useMemo(() => new THREE.Vector3(), []);
   useEffect(() => {
@@ -645,22 +807,53 @@ function IntroCamera() {
   }, [started]);
   useFrame((_, dt) => {
     if (started || !controls) return;
-    // follow a vehicle carrying a FOUP through the cleanroom
+    // follow a vehicle through the cleanroom; once it has stood idle for a while, move on to
+    // the nearest one that is under way (preferring one carrying a FOUP)
     const vs = engine.fab.vehicles;
     let v = vs[pick.current];
-    if (!v || (!v.carrying && vs.some((x) => x.carrying))) {
-      const carrying = vs.findIndex((x) => x.carrying && (x.phase === 'toDrop'));
-      if (carrying >= 0) pick.current = carrying;
+    idleFor.current = v && busy(v) ? 0 : idleFor.current + dt;
+    if (!v || idleFor.current > 3) {
+      idleFor.current = 0;
+      const here = v ? loopPoint(v.s) : null;
+      let best = -1;
+      let bestD = Infinity;
+      vs.forEach((x, i) => {
+        if (!busy(x)) return;
+        const q = loopPoint(x.s);
+        const d = (here ? Math.hypot(q.x - here.x, q.z - here.z) : 0) - (x.carrying ? 20 : 0);
+        if (d < bestD) {
+          bestD = d;
+          best = i;
+        }
+      });
+      if (best >= 0 && best !== pick.current) cut.current = true;
+      pick.current = best >= 0 ? best : Math.max(0, pick.current);
       v = vs[pick.current];
     }
     const p = loopPoint(v.s);
     const ahead = loopPoint(v.s + 6);
-    look.set(p.x, FAB.ohtY - 0.6, p.z);
-    const dirx = ahead.x - p.x;
-    const dirz = ahead.z - p.z;
-    const len = Math.hypot(dirx, dirz) || 1;
-    // camera trails behind and to the side, at standing height
-    pos.set(p.x - (dirx / len) * 5.5 + (dirz / len) * 2.4, 2.4, p.z - (dirz / len) * 5.5 - (dirx / len) * 2.4);
+    // look a little below the rail so the tools fill the frame (orbit controls keep the camera above its target)
+    look.set(p.x, 2.3, p.z);
+    // the camera only ever stands on open floor: the spine when the vehicle is in it,
+    // the bay's centre aisle when the vehicle runs into a bay
+    const inBay = Math.abs(p.z) > FAB.bayStart;
+    if (inBay) {
+      const bx = BAY_X.reduce((a, b) => (Math.abs(b - p.x) < Math.abs(a - p.x) ? b : a));
+      const side = Math.sign(p.z);
+      pos.set(bx, 3.0, side * Math.max(FAB.bayStart - 1.2, Math.abs(p.z) - 7));
+    } else {
+      const dx = Math.sign(ahead.x - p.x) || 1;
+      // (the stockers fill both ends of the spine: stay between them)
+      pos.set(THREE.MathUtils.clamp(p.x - dx * 7, FAB.minX + 6.5, FAB.maxX - 6.5), 3.0, -Math.sign(p.z || 1) * 0.6);
+    }
+    if (cut.current) {
+      // a far switch is a cut to a new shot, never a glide through the tools
+      cut.current = false;
+      if (camera.position.distanceTo(pos) > 12) {
+        camera.position.copy(pos);
+        controls.target.copy(look);
+      }
+    }
     const k = Math.min(1, dt * 0.9);
     camera.position.lerp(pos, k);
     controls.target.lerp(look, Math.min(1, dt * 2));
