@@ -4,14 +4,18 @@
  * multi-wire slicing. The same block is followed through every machine; slicing is
  * shown as a real geometric transformation (the block below the wire plane becomes
  * discrete wafers separated by kerf gaps), not a fade.
+ *
+ * Equipment is built with the detailing kit: static parts (and the rigid moving
+ * assemblies) are merged into one mesh per finish, so the finished models stay cheap.
  */
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { SceneProps } from '../SceneSwitcher';
 import { Lighting, Hall } from '../environments';
 import { M, effectiveView } from '../materials';
-import { B, C, GEO } from '../parts/primitives';
+import { GEO } from '../parts/primitives';
 import { Clickable, SensorIndicator, SignalTower, TechLabel } from '../parts/interaction';
 import { waferGeometry, WAFER_T } from '../parts/wafer';
 import { useUI } from '@/lib/store';
@@ -20,6 +24,9 @@ import { pp, pdt, inPhase } from '@/lib/anim';
 import { track, cutPlane } from '@/lib/runtime';
 import { czRadiusAt, CZ_SEGMENTS, CZ_TOTAL, CZ_BODY_R } from '@/simulation/models';
 import { smooth, clamp } from '@/lib/math';
+import { Kit, cabinet, bellows, grille, windowPane, hmi, estop, ledStrip, hose, type BakedPart, type V3 } from '../kit/build';
+import { KM } from '../kit/finish';
+import { Baked, useKit } from '../kit/Baked';
 
 const X = { crop: -8, grind: 0, saw: 9 };
 const AXIS_Y = 1.15; // ingot axis height on the machines
@@ -48,7 +55,329 @@ function lathePart(s0: number, s1: number) {
   return g;
 }
 
+/* ------------------------------------------------------------ kit helpers */
+
+/**
+ * Kit build + a folding pass so a finished model costs only a few draw calls:
+ *  · every opaque, non-emissive finish (powder coat, stainless, anodised, rubber…) is
+ *    merged into ONE mesh whose vertices carry the finish's colour, roughness,
+ *    metalness, micro-surface map (paint / brushed) and bump strength;
+ *  · every label plate of the model is packed into one canvas atlas.
+ * Glass, LEDs, screens and contact shadows keep their own (shared) materials.
+ */
+function useModel(fn: (k: Kit) => void, deps: unknown[] = []): BakedPart[] {
+  const raw = useKit(fn, deps);
+  const parts = useMemo(() => fold(raw), [raw]);
+  useEffect(
+    () => () =>
+      parts.forEach((p) => {
+        if (raw.includes(p)) return;
+        p.geometry.dispose();
+        const m = p.material as THREE.MeshStandardMaterial;
+        if (m.userData.kitOwned) {
+          m.map?.dispose();
+          m.dispose();
+        }
+      }),
+    [parts, raw],
+  );
+  return parts;
+}
+
+type Std = THREE.MeshStandardMaterial;
+const isStd = (m: THREE.Material): m is Std => (m as Std).isMeshStandardMaterial === true;
+const foldable = (m: THREE.Material) => isStd(m) && !(m as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial && !m.transparent && !m.map && m.toneMapped && m.emissive.getHex() === 0 && !m.vertexColors;
+const isLabel = (m: THREE.Material) => isStd(m) && m.map?.image instanceof HTMLCanvasElement && m.polygonOffset && !m.transparent;
+
+let _fold: Std | null = null;
+/** One shader for all folded finishes: per-vertex colour + (roughness, metalness, map mode, bump). */
+function foldMaterial(): Std {
+  if (_fold) return _fold;
+  const paintTex = KM.paint.roughnessMap;
+  const brushTex = KM.stainless.roughnessMap;
+  const m = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, metalness: 1, roughnessMap: paintTex, bumpMap: paintTex, bumpScale: 1 });
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.kitBrush = { value: brushTex };
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute vec4 kitRM;\nvarying vec4 vKitRM;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\n\tvKitRM = kitRM;');
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying vec4 vKitRM;\nuniform sampler2D kitBrush;')
+      .replace('#include <bumpmap_pars_fragment>', THREE.ShaderChunk.bumpmap_pars_fragment.replace('uniform float bumpScale;', 'float bumpScale;'))
+      .replace('void main() {', 'void main() {\n\tbumpScale = vKitRM.w;')
+      .replace(
+        '#include <roughnessmap_fragment>',
+        [
+          'float kitP = texture2D( roughnessMap, vRoughnessMapUv ).g;',
+          'float kitB = texture2D( kitBrush, vRoughnessMapUv ).g;',
+          'float roughnessFactor = vKitRM.x * ( vKitRM.z > 1.5 ? kitB : ( vKitRM.z > 0.5 ? kitP : 1.0 ) );',
+        ].join('\n'),
+      )
+      .replace('#include <metalnessmap_fragment>', 'float metalnessFactor = vKitRM.y;');
+  };
+  m.customProgramCacheKey = () => 'kit-fold-1';
+  _fold = m;
+  return m;
+}
+
+function tagFinish(g: THREE.BufferGeometry, m: Std) {
+  const n = g.getAttribute('position').count;
+  const col = new Float32Array(n * 3);
+  const rm = new Float32Array(n * 4);
+  const mode = !m.roughnessMap ? 0 : m.roughnessMap === KM.stainless.roughnessMap ? 2 : 1;
+  const bump = m.bumpMap ? m.bumpScale : 0;
+  for (let i = 0; i < n; i++) {
+    col[i * 3] = m.color.r;
+    col[i * 3 + 1] = m.color.g;
+    col[i * 3 + 2] = m.color.b;
+    rm[i * 4] = m.roughness;
+    rm[i * 4 + 1] = m.metalness;
+    rm[i * 4 + 2] = mode;
+    rm[i * 4 + 3] = bump;
+  }
+  g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  g.setAttribute('kitRM', new THREE.BufferAttribute(rm, 4));
+}
+
+/** Pack label plates into one canvas atlas (one draw call for all of a model's plates). */
+function atlasLabels(list: BakedPart[]): BakedPart | null {
+  const W = 512;
+  const GAP = 8;
+  const slots = new Map<THREE.Material, { im: HTMLCanvasElement; y: number }>();
+  let H = 0;
+  for (const p of list) {
+    if (slots.has(p.material)) continue;
+    const im = (p.material as Std).map!.image as HTMLCanvasElement;
+    slots.set(p.material, { im, y: H });
+    H += im.height + GAP;
+  }
+  const cv = document.createElement('canvas');
+  cv.width = W;
+  cv.height = H;
+  const ctx = cv.getContext('2d');
+  if (!ctx) return null;
+  for (const { im, y } of slots.values()) ctx.drawImage(im, 0, y);
+  const geos = list.map((p) => {
+    const { im, y } = slots.get(p.material)!;
+    const g = p.geometry.clone();
+    const uv = g.getAttribute('uv');
+    const us = im.width / W;
+    const v0 = 1 - (y + im.height) / H;
+    const vs = im.height / H;
+    for (let j = 0; j < uv.count; j++) uv.setXY(j, uv.getX(j) * us, v0 + uv.getY(j) * vs);
+    return g;
+  });
+  const geometry = mergeGeometries(geos, false);
+  geos.forEach((g) => g.dispose());
+  if (!geometry) return null;
+  geometry.computeBoundingSphere();
+  const tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 8;
+  const material = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.5, metalness: 0, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  material.userData.kitOwned = true;
+  return { material, geometry, shell: false, cast: false };
+}
+
+function fold(parts: BakedPart[]): BakedPart[] {
+  const finishes: BakedPart[] = [];
+  const labels: BakedPart[] = [];
+  const by = new Map<string, BakedPart[]>();
+  for (const p of parts) {
+    if (!p.shell && foldable(p.material)) {
+      tagFinish(p.geometry, p.material as Std);
+      finishes.push(p);
+    } else if (!p.shell && isLabel(p.material)) labels.push(p);
+    else {
+      const key = `${p.material.uuid}:${p.shell ? 1 : 0}`;
+      const list = by.get(key);
+      if (list) list.push(p);
+      else by.set(key, [p]);
+    }
+  }
+  const out: BakedPart[] = [];
+  if (finishes.length) {
+    const g = mergeGeometries(finishes.map((p) => p.geometry), false);
+    if (g) {
+      g.computeBoundingSphere();
+      out.push({ material: foldMaterial(), geometry: g, shell: false, cast: finishes.some((p) => p.cast) });
+    } else for (const p of finishes) by.set(p.material.uuid + ':f', [p]);
+  }
+  if (labels.length > 1) {
+    const a = atlasLabels(labels);
+    if (a) out.push(a);
+    else out.push(...labels);
+  } else out.push(...labels);
+  for (const list of by.values()) {
+    const m = list[0].material;
+    const cast = !m.transparent && list.some((p) => p.cast);
+    const g = list.length > 1 ? mergeGeometries(list.map((p) => p.geometry), false) : null;
+    if (!g) {
+      for (const p of list) out.push(p.cast === cast ? p : { ...p, cast });
+      continue;
+    }
+    g.computeBoundingSphere();
+    out.push({ material: m, geometry: g, shell: list[0].shell, cast });
+  }
+  return out;
+}
+
+const RX: V3 = [0, 0, Math.PI / 2]; // cylinder axis → X
+const RZ: V3 = [Math.PI / 2, 0, 0]; // cylinder axis → Z
+
+/** Finned motor along local +Y from its mounting face at y = 0 (cowl and terminal box). */
+function motor(k: Kit, r: number, len: number, body: THREE.Material = KM.paintGraphite, metal: THREE.Material = KM.stainless) {
+  k.cyl(metal, r * 0.78, 0.022, [0, 0.011, 0], [0, 0, 0], 24);
+  const bl = len * 0.74;
+  k.cyl(body, r, bl, [0, 0.022 + bl / 2, 0], [0, 0, 0], 28);
+  const n = 14;
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2;
+    k.box(body, [0.007, bl * 0.84, r * 0.2], [Math.cos(a) * r * 1.07, 0.022 + bl / 2, Math.sin(a) * r * 1.07], [0, Math.PI / 2 - a, 0]);
+  }
+  const cl = len - bl - 0.022;
+  k.cyl(body, r * 1.02, cl, [0, 0.022 + bl + cl / 2, 0], [0, 0, 0], 28);
+  k.cyl(KM.seam, r * 0.72, 0.004, [0, len + 0.002, 0], [0, 0, 0], 24);
+  k.rbox(body, [r * 0.8, bl * 0.34, r * 0.8], 0.008, [r * 1.18, 0.022 + bl * 0.45, 0]);
+}
+
+/** Handwheel in the local XZ plane (axis +Y), with spokes and a crank knob. */
+function handwheel(k: Kit, R: number, m: THREE.Material = KM.anodizedDark) {
+  k.torus(m, R, R * 0.11, [0, 0, 0], [0, 0, 0], 28);
+  k.cyl(m, R * 0.25, R * 0.4, [0, 0, 0], [0, 0, 0], 16);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2;
+    k.box(m, [R * 0.9, R * 0.08, R * 0.12], [Math.cos(a) * R * 0.5, 0, Math.sin(a) * R * 0.5], [0, -a, 0]);
+  }
+  k.cyl(KM.paintGraphite, R * 0.1, R * 0.6, [R, R * 0.3, 0], [0, 0, 0], 10);
+}
+
+/** Safety light-curtain post (receiver/emitter column) facing local +X. */
+function lightCurtain(k: Kit, h: number) {
+  k.box(KM.paintGraphite, [0.12, 0.012, 0.12], [0, 0.006, 0]);
+  k.rbox(KM.paintYellow, [0.045, h, 0.045], 0.008, [0, h / 2 + 0.012, 0]);
+  k.box(KM.seam, [0.004, h * 0.86, 0.022], [0.0235, h / 2 + 0.012, 0]);
+  k.box(KM.ledAmber, [0.006, 0.03, 0.012], [0.02, h - 0.02, 0]);
+}
+
 /* ------------------------------------------------------------ cropping */
+
+/** Cropping saw bed: V-block rests, scrap totes at both ends, traverse spine, guard screen, HMI. */
+function buildCropSaw(k: Kit) {
+  const TOP = 0.777; // worktable surface
+  cabinet(k, { size: [2.1, 0.72, 1.1], panels: 3, rows: [], sidePanels: 1, stripe: KM.paintAccent, ao: false });
+  k.rbox(KM.paintGrey, [2.14, 0.035, 1.14], 0.008, [0, TOP - 0.0175, 0]);
+  for (const z of [-0.44, -0.27, 0.27, 0.44]) k.box(KM.seam, [2.08, 0.002, 0.014], [0, TOP + 0.0005, z], [0, 0, 0], { cast: false });
+  k.label('model', 'CS-1900', 'INGOT CROPPING BAND SAW', 0.42, 0.1, [0.25, 0.56, 0.552]);
+  estop(k, [-0.86, 0.55, 0.55]);
+  // V-block rests with polyurethane pads, one per block between the cut planes
+  const vb: [number, number][] = [[-0.17, TOP], [0.17, TOP], [0.17, 1.04], [0.127, 1.04], [0, 0.913], [-0.127, 1.04], [-0.17, 1.04]];
+  for (const x of [-0.44, 0.01, 0.46]) {
+    k.extrude(KM.stainless, vb, 0.12, [x - 0.06, 0, 0], [0, Math.PI / 2, 0], { bevel: 0.004 });
+    for (const s of [-1, 1]) {
+      k.box(KM.rubber, [0.13, 0.012, 0.16], [x, 0.9807, s * 0.0593], [-s * Math.PI / 4, 0, 0]);
+      k.cyl(KM.stainlessDark, 0.012, 0.01, [x - 0.03, 1.046, s * 0.15], [0, 0, 0], 6);
+      k.cyl(KM.stainlessDark, 0.012, 0.01, [x + 0.03, 1.046, s * 0.15], [0, 0, 0], 6);
+    }
+    k.box(KM.paintGraphite, [0.16, 0.02, 0.36], [x, TOP + 0.01, 0]);
+  }
+  // scrap totes for crown and tail
+  for (const s of [-1, 1])
+    k.at([s * 1.4, 0, 0], 0, () => {
+      k.rbox(KM.paintGraphite, [0.62, 0.3, 0.92], 0.012, [0, 0.15, 0]);
+      k.box(KM.paintGrey, [0.6, 0.012, 0.86], [0, 0.306, 0]);
+      k.box(KM.paintGrey, [0.6, 0.44, 0.012], [0, 0.52, -0.43]);
+      k.box(KM.paintGrey, [0.6, 0.3, 0.012], [0, 0.45, 0.43]);
+      for (const e of [-1, 1]) k.box(KM.paintGrey, [0.012, 0.44, 0.86], [e * 0.3, 0.52, 0]);
+      for (const x of [-0.15, 0.15]) k.box(KM.paintGrey, [0.02, 0.26, 0.014], [x, 0.44, 0.437]);
+      k.cyl(KM.stainless, 0.009, 0.6, [0, 0.6, 0.43], RX, 10);
+      k.cyl(KM.stainless, 0.009, 0.6, [0, 0.74, -0.43], RX, 10);
+      for (const e of [-1, 1]) k.cyl(KM.stainless, 0.009, 0.86, [e * 0.3, 0.74, 0], RZ, 10);
+      for (const e of [-1, 1]) k.cyl(KM.rubber, 0.035, 0.03, [e * 0.22, 0.035, 0.36], RX, 16);
+    });
+  k.label('info', 'Si SCRAP', 'CROWN · TAIL → RECYCLE', 0.3, 0.075, [-1.4, 0.42, 0.438]);
+  // traverse spine behind the bed: the saw column runs in its sealed slot
+  k.box(KM.paintGraphite, [3.44, 0.06, 0.22], [0, 0.03, -0.88]);
+  k.rbox(KM.paint, [3.5, 0.89, 0.28], 0.02, [0, 0.505, -0.88]);
+  k.box(KM.seam, [3.44, 0.004, 0.17], [0, 0.951, -0.88], [0, 0, 0], { cast: false });
+  for (const s of [-1, 1]) k.box(KM.rubber, [3.44, 0.012, 0.014], [0, 0.955, -0.88 + s * 0.08]);
+  for (let i = 1; i < 5; i++) k.box(KM.seam, [0.004, 0.84, 0.002], [-1.75 + i * 0.7, 0.5, -0.739], [0, 0, 0], { cast: false });
+  ledStrip(k, 0.5, [1.1, 0.88, -0.738]);
+  // cable carrier lying on the spine
+  for (let i = 0; i < 26; i++) k.rbox(KM.plastic, [0.055, 0.045, 0.07], 0.008, [-1.6 + i * 0.06, 0.98, -0.99]);
+  // polycarbonate guard screen
+  for (let i = 0; i <= 4; i++) k.rbox(KM.anodizedDark, [0.05, 2.2, 0.05], 0.008, [-1.75 + i * 0.875, 1.1, -1.12]);
+  for (let i = 0; i < 4; i++) windowPane(k, 0.8, 1.05, [-1.3125 + i * 0.875, 1.55, -1.12], { frame: KM.anodizedDark, glass: KM.glass });
+  k.box(KM.anodizedDark, [3.55, 0.05, 0.06], [0, 2.18, -1.12]);
+  // light curtains on the loading side
+  for (const s of [-1, 1]) k.at([s * 1.8, 0, 0.55], s > 0 ? Math.PI : 0, () => lightCurtain(k, 1.55));
+  // HMI pedestal at the right front corner
+  const yaw = -0.35;
+  const hp: V3 = [2.0, 1.42, 0.86];
+  hmi(k, hp, yaw);
+  const ax = hp[0] + 0.22 * Math.sin(yaw);
+  const az = hp[2] - 0.22 * Math.cos(yaw);
+  k.cyl(KM.anodizedDark, 0.03, 1.42, [ax, 0.71, az], [0, 0, 0], 16);
+  k.cyl(KM.paintGraphite, 0.16, 0.02, [ax, 0.01, az], [0, 0, 0], 24);
+  estop(k, [ax - 0.05, 1.12, az + 0.03]);
+  k.ao(3.6, 1.35, [0, 0, -0.2], 1.15);
+}
+
+/** Saw head (moves with the blade group): band-wheel housing, blade loop, guides, column ram. */
+function buildSawHead(k: Kit) {
+  const CUT = 0.19; // cutting run height (local)
+  const zc = 0.55;
+  const yc = 0.62;
+  const R = 0.29;
+  // vertical ram (runs down into the spine slot) with linear guide strips
+  k.rbox(KM.paint, [0.16, 2.15, 0.14], 0.02, [0, -0.125, -0.88]);
+  for (const s of [-1, 1]) k.box(KM.stainless, [0.008, 2.1, 0.03], [s * 0.084, -0.125, -0.88]);
+  k.rbox(KM.paintGraphite, [0.2, 0.62, 0.16], 0.02, [0, yc, -0.8]);
+  // band-wheel housing (stadium) with hubs and latches
+  const st: [number, number][] = [];
+  for (let i = 0; i <= 14; i++) {
+    const a = -Math.PI / 2 + (i / 14) * Math.PI;
+    st.push([zc + Math.cos(a) * R, yc + Math.sin(a) * R]);
+  }
+  for (let i = 0; i <= 14; i++) {
+    const a = Math.PI / 2 + (i / 14) * Math.PI;
+    st.push([-zc + Math.cos(a) * R, yc + Math.sin(a) * R]);
+  }
+  k.extrude(KM.paint, st, 0.15, [-0.075, 0, 0], [0, Math.PI / 2, 0], { bevel: 0.012 });
+  for (const z of [-zc, zc])
+    for (const sx of [-1, 1]) {
+      k.cyl(KM.stainless, 0.075, 0.016, [sx * 0.094, yc, z], RX, 28);
+      for (let i = 0; i < 6; i++) {
+        const a = (i / 6) * Math.PI * 2;
+        k.cyl(KM.paintGraphite, 0.008, 0.012, [sx * 0.104, yc + Math.cos(a) * 0.052, z + Math.sin(a) * 0.052], RX, 6);
+      }
+    }
+  for (const z of [-0.2, 0.2]) k.rbox(KM.stainless, [0.02, 0.05, 0.07], 0.006, [0.093, 0.86, z]);
+  k.box(KM.seam, [0.003, 0.004, 1.06], [0.089, 0.79, 0], [0, 0, 0], { cast: false });
+  k.label('warn', 'BLADE', '', 0.1, 0.1, [0.0895, 0.5, 0.32], [0, Math.PI / 2, 0]);
+  k.label('model', 'BS-450', 'BAND SAW HEAD · 450 mm WHEELS', 0.3, 0.075, [0.0895, 0.67, -0.2], [0, Math.PI / 2, 0]);
+  // blade: cutting run between the guides, sloped runs up to the wheels
+  k.box(KM.stainless, [0.003, 0.03, 0.74], [0, CUT, 0]);
+  k.box(KM.seam, [0.0034, 0.006, 0.74], [0, CUT - 0.016, 0], [0, 0, 0], { cast: false });
+  const dz = 0.19;
+  const dy = 0.14;
+  const ang = Math.atan2(dy, dz);
+  for (const s of [-1, 1]) {
+    k.box(KM.stainless, [0.003, 0.03, Math.hypot(dz, dy)], [0, CUT + dy / 2, s * (0.36 + dz / 2)], [-s * ang, 0, 0]);
+    // guide arm + carbide guide block, coolant nozzle
+    k.rbox(KM.paintGraphite, [0.08, 0.2, 0.07], 0.01, [0, 0.33, s * 0.39]);
+    k.rbox(KM.paintGraphite, [0.07, 0.06, 0.08], 0.008, [0, 0.21, s * 0.36]);
+    k.tube(KM.stainless, [[0.045, 0.36, s * 0.41], [0.05, 0.28, s * 0.37], [0.03, 0.235, s * 0.31]], 0.006, { radial: 6 });
+    // blade guard over the sloped run
+    k.rbox(KM.paintYellow, [0.11, 0.1, 0.17], 0.015, [0, 0.3, s * 0.48]);
+  }
+  // blade-tension handwheel at the front end
+  k.cyl(KM.stainless, 0.018, 0.06, [0, yc, 0.87], RZ, 12);
+  k.at([0, yc, 0.9], [Math.PI / 2, 0, 0], () => handwheel(k, 0.07, KM.paintGraphite));
+  // drive motor on the rear wheel
+  k.at([-0.087, yc, -zc], [0, 0, Math.PI / 2], () => motor(k, 0.09, 0.26));
+  hose(k, [-0.2, 0.74, -0.62], [-0.07, 0.42, -0.85], 0.012, 0.06, KM.paintGraphite);
+}
 
 function CropStation() {
   const cx = X.crop;
@@ -101,23 +430,16 @@ function CropStation() {
     });
     if (active) track('focus', cx, AXIS_Y, 0);
   });
+  const bed = useModel(buildCropSaw);
+  const head = useModel(buildSawHead);
   return (
     <group>
       <Clickable sel={{ kind: 'machine', id: 'ingot-grinder', label: 'Cropping band saw' }}>
-        <B s={[3.4, 0.8, 1.1]} m={M.panel} position={[cx, 0.4, 0]} />
-        {[-1.2, -0.4, 0.4, 1.2].map((dx) => (
-          <group key={dx} position={[cx + dx, 0, 0]}>
-            <B s={[0.16, 0.3, 0.5]} m={M.steelDark} position={[0, 0.95, 0]} />
-            <mesh position={[0, 1.0, 0]} rotation={[0, 0, Math.PI / 4]} material={M.rubber}>
-              <boxGeometry args={[0.12, 0.12, 0.42]} />
-            </mesh>
-          </group>
-        ))}
+        <group position={[cx, 0, 0]}>
+          <Baked parts={bed} />
+        </group>
         <group ref={blade}>
-          <B s={[0.06, 1.6, 1.4]} m={M.yellow} position={[0, 0.5, -0.75]} />
-          <B s={[0.06, 0.25, 1.4]} m={M.yellow} position={[0, 1.2, 0]} />
-          <B s={[0.008, 1.0, 0.03]} m={M.steel} position={[0, 0.55, 0]} />
-          <C r={0.12} h={0.08} m={M.steelDark} position={[0, 1.2, -0.75]} rotation={[0, 0, Math.PI / 2]} />
+          <Baked parts={head} />
         </group>
       </Clickable>
       <mesh ref={crown} geometry={crownGeo} material={rough} castShadow />
@@ -136,12 +458,190 @@ function CropStation() {
 
 /* ------------------------------------------------------------ OD grinding + notch */
 
+const HEAD_X = BLOCK / 2 + 0.3; // headstock / tailstock centres (±)
+
+/** Grinder base: machine bed, work table, wheelhead cross-slide, coolant trough, guard enclosure. */
+function buildGrinderBase(k: Kit) {
+  const TOP = 0.882;
+  k.at([0, 0, -0.1], 0, () => cabinet(k, { size: [2.4, 0.8, 1.3], panels: 3, rows: [0.36], sidePanels: 2, handles: true, stripe: KM.paintAccent, ao: false }));
+  // work table carrying headstock and tailstock
+  k.rbox(KM.paintGrey, [2.1, 0.06, 0.6], 0.01, [0, TOP - 0.03, -0.12]);
+  for (const z of [-0.36, 0.12]) k.box(KM.stainless, [2.0, 0.012, 0.03], [0, TOP + 0.003, z]);
+  // coolant trough under the ingot
+  k.rbox(KM.stainless, [0.6, 0.03, 0.44], 0.006, [0, TOP + 0.012, 0]);
+  k.box(KM.seam, [0.54, 0.004, 0.38], [0, TOP + 0.0275, 0], [0, 0, 0], { cast: false });
+  // wheelhead cross-slide with rails and bellows way covers outside the saddle travel
+  k.rbox(KM.paintGrey, [1.8, 0.04, 0.3], 0.008, [0, 0.842, 0.4]);
+  for (const z of [0.3, 0.5]) k.box(KM.stainless, [1.7, 0.012, 0.02], [0, 0.868, z]);
+  for (const [x0, x1] of [[-0.88, -0.69], [0.13, 0.88]] as const) {
+    const n = Math.round((x1 - x0) / 0.026);
+    for (let i = 0; i <= n; i++) k.box(i % 2 ? KM.paintGraphite : KM.plastic, [0.012, 0.05, 0.26], [x0 + i * 0.026, 0.887, 0.4]);
+  }
+  // guard enclosure: back panel with a window, glazed end panels, open top frame
+  const EB = 0.822;
+  const ET = 2.25;
+  const bz = -0.72;
+  k.box(KM.paint, [2.4, 0.38, 0.04], [0, EB + 0.19, bz]);
+  k.box(KM.paint, [2.4, 0.22, 0.04], [0, ET - 0.11, bz]);
+  for (const s of [-1, 1]) k.box(KM.paint, [0.45, ET - EB - 0.6, 0.04], [s * 0.975, (EB + 0.38 + ET - 0.22) / 2, bz]);
+  windowPane(k, 1.5, ET - EB - 0.6, [0, (EB + 0.38 + ET - 0.22) / 2, bz], { frame: KM.anodizedDark, glass: KM.glass });
+  k.box(KM.paintAccent, [2.4, 0.02, 0.004], [0, ET - 0.06, bz + 0.022], [0, 0, 0], { cast: false });
+  for (const s of [-1, 1]) {
+    k.box(KM.paint, [0.04, 0.32, 1.12], [s * 1.2, EB + 0.16, -0.16]);
+    k.at([s * 1.2, 0, -0.16], [0, s * Math.PI / 2, 0], () => windowPane(k, 1.0, 0.98, [0, EB + 0.32 + 0.52, 0], { frame: KM.anodizedDark, glass: KM.glass }));
+    for (const z of [bz, 0.4]) k.rbox(KM.anodizedDark, [0.05, ET - EB, 0.05], 0.008, [s * 1.2, (EB + ET) / 2, z]);
+    k.box(KM.anodizedDark, [0.05, 0.05, 1.17], [s * 1.2, ET, -0.16]);
+  }
+  k.box(KM.anodizedDark, [2.45, 0.05, 0.05], [0, ET, 0.4]);
+  k.box(KM.anodizedDark, [2.45, 0.05, 0.05], [0, ET, bz]);
+  k.box(KM.anodizedDark, [0.1, 0.02, 0.2], [1.0, ET + 0.035, -0.62]);
+  k.label('warn', 'ROTATING', '', 0.11, 0.11, [1.222, 1.0, 0.1], [0, Math.PI / 2, 0]);
+  // nameplate, controls
+  k.label('model', 'CG-300', 'OD & NOTCH GRINDER · 300 mm', 0.42, 0.1, [0.0, 0.72, 0.552]);
+  estop(k, [-0.95, 0.72, 0.55]);
+  const yaw = -0.45;
+  const hp: V3 = [1.55, 1.48, 0.7];
+  hmi(k, hp, yaw);
+  const ax = hp[0] + 0.22 * Math.sin(yaw);
+  const az = hp[2] - 0.22 * Math.cos(yaw);
+  k.cyl(KM.anodizedDark, 0.03, 1.48, [ax, 0.74, az], [0, 0, 0], 16);
+  k.cyl(KM.paintGraphite, 0.16, 0.02, [ax, 0.01, az], [0, 0, 0], 24);
+  // coolant unit with pump and filter at the left end
+  k.at([-1.62, 0, -0.25], 0, () => {
+    cabinet(k, { size: [0.6, 0.62, 0.8], panels: 1, rows: [], stripe: false, vent: true, bolts: false, ao: false });
+    k.at([0.08, 0.642, 0.1], 0, () => motor(k, 0.07, 0.2, KM.paintBlue));
+    k.cyl(KM.stainless, 0.07, 0.24, [-0.14, 0.76, -0.15], [0, 0, 0], 24);
+    k.cyl(KM.paintGraphite, 0.075, 0.03, [-0.14, 0.895, -0.15], [0, 0, 0], 24);
+  });
+  k.pipe(KM.stainless, [[-1.76, 0.88, -0.4], [-1.76, 1.05, -0.4], [-1.25, 1.05, -0.4], [-0.33, 1.05, -0.4], [-0.33, 0.93, -0.2]], 0.016, 0.06);
+  hose(k, [-1.5, 0.88, -0.6], [-1.23, 0.5, -0.76], 0.02, 0.08, KM.rubber);
+  k.ao(2.6, 1.35, [0, 0, -0.1], 1.2);
+  k.ao(0.6, 0.8, [-1.62, 0, -0.25]);
+}
+
+/** Headstock (drive) and tailstock (quill, handwheel) that clamp the block between pads. */
+function buildSpindles(k: Kit) {
+  const TOP = 0.882;
+  // headstock
+  k.rbox(KM.paintGraphite, [0.42, 0.03, 0.5], 0.006, [-HEAD_X, TOP + 0.015, 0]);
+  k.rbox(KM.paint, [0.36, 0.5, 0.46], 0.03, [-HEAD_X, TOP + 0.28, 0]);
+  k.box(KM.seam, [0.362, 0.004, 0.462], [-HEAD_X, TOP + 0.36, 0], [0, 0, 0], { cast: false });
+  k.at([-HEAD_X - 0.12, 1.5, -0.04], [0, 0, -Math.PI / 2], () => motor(k, 0.075, 0.28));
+  k.rbox(KM.paint, [0.06, 0.42, 0.38], 0.02, [-HEAD_X - 0.21, TOP + 0.26, 0]);
+  k.cyl(KM.stainless, 0.11, 0.025, [-0.2875, AXIS_Y, 0], RX, 36);
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2;
+    k.box(KM.paintGraphite, [0.03, 0.03, 0.02], [-0.262, AXIS_Y + Math.cos(a) * 0.08, Math.sin(a) * 0.08], [a, 0, 0]);
+  }
+  k.cyl(KM.chrome, 0.04, 0.09, [-0.23, AXIS_Y, 0], RX, 24);
+  k.cyl(KM.paintGraphite, 0.07, 0.008, [-0.184, AXIS_Y, 0], RX, 32);
+  // tailstock
+  k.rbox(KM.paintGraphite, [0.4, 0.03, 0.44], 0.006, [HEAD_X, TOP + 0.015, 0]);
+  k.rbox(KM.paint, [0.34, 0.42, 0.4], 0.03, [HEAD_X, TOP + 0.24, 0]);
+  k.cyl(KM.paint, 0.075, 0.05, [0.3, AXIS_Y, 0], RX, 28);
+  k.cyl(KM.chrome, 0.045, 0.1, [0.24, AXIS_Y, 0], RX, 24);
+  k.cyl(KM.paintGraphite, 0.07, 0.008, [0.184, AXIS_Y, 0], RX, 32);
+  k.cyl(KM.chrome, 0.016, 0.07, [HEAD_X + 0.2, AXIS_Y, 0], RX, 12);
+  k.at([HEAD_X + 0.235, AXIS_Y, 0], [0, 0, -Math.PI / 2], () => handwheel(k, 0.08));
+  k.cyl(KM.chrome, 0.03, 0.3, [HEAD_X, 1.22, -0.22], RX, 16);
+  k.cyl(KM.paintGraphite, 0.04, 0.12, [HEAD_X + 0.16, 1.22, -0.22], RX, 16);
+  k.rbox(KM.paintGraphite, [0.03, 0.12, 0.03], 0.008, [HEAD_X, TOP + 0.5, 0.12], [0.4, 0, 0]);
+  for (const x of [-HEAD_X, HEAD_X]) for (const z of [-0.18, 0.18]) k.cyl(KM.stainlessDark, 0.012, 0.012, [x + (x < 0 ? -0.14 : 0.14), TOP + 0.034, z], [0, 0, 0], 6);
+}
+
+/** Laser micrometer: emitter above, receiver below, C-yoke behind the block. */
+function buildGauge(k: Kit) {
+  k.rbox(KM.anodizedDark, [0.1, 0.07, 0.12], 0.01, [0, AXIS_Y + 0.285, 0]);
+  k.rbox(KM.anodizedDark, [0.1, 0.05, 0.12], 0.01, [0, 0.93, 0]);
+  k.box(KM.seam, [0.06, 0.004, 0.02], [0, AXIS_Y + 0.248, 0], [0, 0, 0], { cast: false });
+  k.box(KM.seam, [0.06, 0.004, 0.02], [0, 0.956, 0], [0, 0, 0], { cast: false });
+  k.rbox(KM.paint, [0.05, 0.62, 0.05], 0.01, [0, 1.2, -0.26]);
+  k.rbox(KM.paint, [0.05, 0.04, 0.3], 0.01, [0, AXIS_Y + 0.31, -0.13]);
+  k.rbox(KM.paint, [0.05, 0.035, 0.3], 0.01, [0, 0.925, -0.13]);
+  k.box(KM.ledGreen, [0.012, 0.012, 0.004], [0.03, AXIS_Y + 0.29, 0.061], [0, 0, 0], { cast: false });
+}
+
+/** Diamond wheel (rotates as a whole): steel core, resin-bond rim, clamp flange, bolts. */
+function buildWheel(k: Kit) {
+  k.cyl(M.graphite, 0.25, 0.042, [0, 0, 0], RX, 64);
+  k.cyl(KM.stainless, 0.236, 0.048, [0, 0, 0], RX, 64);
+  k.cyl(KM.stainlessDark, 0.09, 0.07, [0, 0, 0], RX, 32);
+  k.cyl(KM.stainlessDark, 0.035, 0.1, [0, 0, 0], RX, 16);
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    k.cyl(KM.stainless, 0.009, 0.08, [0, Math.cos(a) * 0.065, Math.sin(a) * 0.065], RX, 6);
+    k.cyl(M.graphite, 0.02, 0.05, [0, Math.cos(a + 0.5) * 0.17, Math.sin(a + 0.5) * 0.17], RX, 12);
+  }
+}
+
+/** Wheelhead (follows the wheel's traverse, does not spin): saddle, spindle, motor, hood, coolant nozzle. */
+function buildWheelhead(k: Kit) {
+  // spindle housing and motor sit on the far (−x) side so the contact zone stays in view
+  k.rbox(KM.paint, [0.42, 0.17, 0.3], 0.02, [-0.28, -0.195, 0.02]);
+  k.rbox(KM.paintGraphite, [0.46, 0.02, 0.32], 0.006, [-0.28, -0.27, 0.02]);
+  k.rbox(KM.paint, [0.2, 0.06, 0.15], 0.015, [-0.15, -0.085, 0]);
+  k.cyl(KM.paint, 0.08, 0.2, [-0.15, 0, 0], RX, 32);
+  k.cyl(KM.stainless, 0.084, 0.016, [-0.055, 0, 0], RX, 32);
+  k.at([-0.25, 0, 0], [0, 0, Math.PI / 2], () => motor(k, 0.085, 0.24));
+  // hood over the top of the wheel (open towards the work)
+  k.add(KM.paint, new THREE.CylinderGeometry(0.285, 0.285, 0.085, 36, 1, false, -2.618, 1.92), [0, 0, 0], [0, 0, -Math.PI / 2]);
+  k.label('warn', 'WHEEL', '', 0.07, 0.07, [0.044, 0.2, 0.06], [0, Math.PI / 2, 0]);
+  // coolant nozzle aimed at the contact line
+  k.tube(KM.stainless, [[0.0, 0.29, -0.04], [0.0, 0.34, -0.14], [0.0, 0.315, -0.215]], 0.008, { radial: 8 });
+  k.rbox(KM.stainless, [0.08, 0.02, 0.03], 0.005, [0, 0.302, -0.23]);
+  k.cyl(KM.paintGraphite, 0.014, 0.03, [0, 0.33, -0.1], [0.9, 0, 0], 10);
+}
+
+/** X-ray orientation unit: tube on a goniometer arc, flat-panel detector, belt-driven notch wheel. */
+function buildXray(k: Kit) {
+  const tc: V3 = [0.1, 1.77, 0.365];
+  k.at(tc, [0.7, 0, 0], () => {
+    k.cyl(KM.paintYellow, 0.085, 0.3, [0, 0, 0], [0, 0, 0], 32);
+    for (const y of [-0.1, 0, 0.1]) k.torus(KM.paintYellow, 0.087, 0.006, [0, y, 0], [0, 0, 0], 32);
+    k.cyl(KM.paintGraphite, 0.09, 0.03, [0, 0.16, 0], [0, 0, 0], 32);
+    k.cyl(KM.paintGraphite, 0.05, 0.04, [0, -0.17, 0], [0, 0, 0], 24);
+    k.cyl(KM.stainless, 0.032, 0.06, [0, -0.215, 0], [0, 0, 0], 20);
+    k.label('warn', 'X-RAY', '', 0.08, 0.08, [0, 0.02, 0.088], [0, 0, 0]);
+  });
+  hose(k, [0.1, 1.95, 0.48], [0.4, 2.0, -0.6], 0.016, 0.12, KM.paintGraphite);
+  // detector facing the ingot
+  k.at([0.1, 1.62, -0.42], [0.6435, 0, 0], () => {
+    k.rbox(KM.paintGraphite, [0.24, 0.2, 0.08], 0.015, [0, 0, 0]);
+    k.box(KM.seam, [0.16, 0.12, 0.004], [0, 0, 0.041], [0, 0, 0], { cast: false });
+    for (let i = 0; i < 5; i++) k.box(KM.paintGraphite, [0.2, 0.008, 0.03], [0, -0.07 + i * 0.035, -0.055]);
+  });
+  // goniometer arc around the ingot axis
+  const arc: V3[] = [];
+  for (let i = 0; i <= 16; i++) {
+    const t = -0.87 + (i / 16) * 1.92;
+    arc.push([0.27, AXIS_Y + 0.62 * Math.cos(t), 0.62 * Math.sin(t)]);
+  }
+  k.tube(KM.stainless, arc, 0.016, { radial: 8 });
+  const at = (t: number): V3 => [0.27, AXIS_Y + 0.62 * Math.cos(t), 0.62 * Math.sin(t)];
+  const c1 = at(0.532);
+  const c2 = at(-0.73);
+  k.rbox(KM.paintGraphite, [0.2, 0.05, 0.07], 0.01, [0.185, c1[1] + 0.03, c1[2] + 0.01]);
+  k.rbox(KM.paintGraphite, [0.19, 0.045, 0.06], 0.01, [0.185, c2[1], c2[2]]);
+  k.rbox(KM.paint, [0.06, 0.68, 0.06], 0.01, [0.27, 0.882 + 0.34, -0.48]);
+  // notch wheel with V-edge, belt guard and motor
+  k.at([-0.12, AXIS_Y + R_GROUND + 0.05, 0], [0, 0, -Math.PI / 2], () => {
+    k.lathe(M.graphite, [[0.1, -0.012], [0.12, 0], [0.1, 0.012]], [0, 0, 0], [0, 0, 0], 48);
+    k.cyl(KM.stainless, 0.1, 0.024, [0, 0, 0], [0, 0, 0], 40);
+    k.cyl(KM.stainlessDark, 0.035, 0.05, [0, 0, 0], [0, 0, 0], 16);
+  });
+  k.rbox(KM.paintYellow, [0.03, 0.36, 0.11], 0.012, [-0.155, AXIS_Y + R_GROUND + 0.2, 0]);
+  k.at([-0.17, AXIS_Y + R_GROUND + 0.36, 0], [0, 0, Math.PI / 2], () => motor(k, 0.06, 0.18));
+  k.rbox(KM.paint, [0.05, 0.05, 0.52], 0.01, [-0.2, AXIS_Y + R_GROUND + 0.36, -0.26]);
+  k.rbox(KM.paint, [0.06, 0.86, 0.06], 0.01, [-0.2, 0.882 + 0.43, -0.5]);
+}
+
 function Grinder({ variant }: { variant: string }) {
   const cx = X.grind;
   const block = useRef<THREE.Group>(null);
   const groundPart = useRef<THREE.Mesh>(null);
   const roughPart = useRef<THREE.Mesh>(null);
   const wheel = useRef<THREE.Group>(null);
+  const wheelhead = useRef<THREE.Group>(null);
   const laserRef = useRef<THREE.Mesh>(null);
   const xbeam = useRef<THREE.Mesh>(null);
   const notch = useRef<THREE.Mesh>(null);
@@ -174,6 +674,11 @@ function Grinder({ variant }: { variant: string }) {
       wheel.current.position.x = cx - L / 2 + gl;
       wheel.current.rotation.x += pdt(dt) * 20;
     }
+    // the wheelhead rides with the wheel's traverse (it does not spin)
+    if (wheelhead.current) {
+      wheelhead.current.visible = grinding;
+      wheelhead.current.position.x = cx - L / 2 + gl;
+    }
     if (laserRef.current) laserRef.current.visible = grinding && inPhase('measure');
     if (xbeam.current) xbeam.current.visible = notching && inPhase('xray');
     if (notch.current) {
@@ -195,20 +700,23 @@ function Grinder({ variant }: { variant: string }) {
     }
     if (grinding || notching) track('focus', cx, AXIS_Y, 0);
   });
+  const base = useModel(buildGrinderBase);
+  const spindles = useModel(buildSpindles);
+  const gauge = useModel(buildGauge);
+  const wheelParts = useModel(buildWheel);
+  const headParts = useModel(buildWheelhead);
+  const xray = useModel(buildXray);
   return (
     <group>
       <Clickable sel={{ kind: 'machine', id: 'ingot-grinder', label: 'OD grinder / notch grinder' }}>
-        <B s={[2.2, 0.9, 1.2]} m={M.panel} position={[cx, 0.45, -0.1]} />
-        <B s={[2.2, 0.08, 0.5]} m={M.steelDark} position={[cx, 0.92, 0]} />
+        <group position={[cx, 0, 0]}>
+          <Baked parts={base} />
+        </group>
         <Clickable sel={{ kind: 'component', id: 'spindles', machine: 'ingot-grinder', label: 'Headstock & tailstock' }}>
-          <B s={[0.35, 0.55, 0.45]} m={M.panelGrey} position={[cx - L / 2 - 0.3, 1.15, 0]} />
-          <B s={[0.35, 0.45, 0.4]} m={M.panelGrey} position={[cx + L / 2 + 0.3, 1.1, 0]} />
-          <C r={0.04} h={0.2} m={M.steel} position={[cx - L / 2 - 0.1, AXIS_Y, 0]} rotation={[0, 0, Math.PI / 2]} />
-          <C r={0.04} h={0.2} m={M.steel} position={[cx + L / 2 + 0.1, AXIS_Y, 0]} rotation={[0, 0, Math.PI / 2]} />
+          <group position={[cx, 0, 0]}>
+            <Baked parts={spindles} />
+          </group>
         </Clickable>
-        {/* enclosure back wall with window */}
-        <B s={[2.2, 1.3, 0.06]} m={M.panel} position={[cx, 1.6, -0.62]} />
-        <B s={[1.4, 0.7, 0.02]} m={M.glassDark} position={[cx, 1.55, -0.58]} />
         <SignalTower position={[cx + 1.0, 2.25, -0.6]} />
       </Clickable>
       <group position={[cx, AXIS_Y, 0]}>
@@ -229,16 +737,20 @@ function Grinder({ variant }: { variant: string }) {
       </group>
       <group ref={wheel} position={[cx, AXIS_Y, 0.42]}>
         <Clickable sel={{ kind: 'component', id: 'grind-wheel', machine: 'ingot-grinder', label: 'Diamond grinding wheel' }}>
-          <C r={0.24} h={0.05} m={M.steelDark} rotation={[0, 0, Math.PI / 2]} />
-          <C r={0.25} h={0.03} m={M.graphite} rotation={[0, 0, Math.PI / 2]} />
-          <B s={[0.1, 0.1, 0.4]} m={M.panelGrey} position={[0, 0, 0.25]} />
+          <Baked parts={wheelParts} />
+        </Clickable>
+      </group>
+      <group ref={wheelhead} position={[cx, AXIS_Y, 0.42]}>
+        <Clickable sel={{ kind: 'component', id: 'grind-wheel', machine: 'ingot-grinder', label: 'Diamond grinding wheel' }}>
+          <Baked parts={headParts} />
         </Clickable>
       </group>
       <instancedMesh ref={spray} args={[GEO.sphereLow, coolant, 30]} />
       {/* laser micrometer */}
       <Clickable sel={{ kind: 'component', id: 'gauge', machine: 'ingot-grinder', label: 'Laser diameter gauge' }}>
-        <B s={[0.12, 0.12, 0.12]} m={M.panelDark} position={[cx, AXIS_Y + 0.28, 0]} />
-        <B s={[0.12, 0.12, 0.12]} m={M.panelDark} position={[cx, AXIS_Y - 0.28, 0]} />
+        <group position={[cx, 0, 0]}>
+          <Baked parts={gauge} />
+        </group>
         <mesh ref={laserRef} position={[cx, AXIS_Y, 0]} material={laser} visible={false}>
           <boxGeometry args={[0.004, 0.5, 0.004]} />
         </mesh>
@@ -246,13 +758,13 @@ function Grinder({ variant }: { variant: string }) {
       {/* X-ray orientation unit */}
       {variant === 'notch' && (
         <Clickable sel={{ kind: 'component', id: 'xray', machine: 'ingot-grinder', label: 'X-ray orientation unit' }}>
-          <B s={[0.3, 0.3, 0.3]} m={M.yellow} position={[cx + 0.1, AXIS_Y + 0.5, 0.35]} />
-          <B s={[0.25, 0.2, 0.2]} m={M.panelDark} position={[cx + 0.1, AXIS_Y + 0.45, -0.4]} />
+          <group position={[cx, 0, 0]}>
+            <Baked parts={xray} />
+          </group>
           <mesh ref={xbeam} position={[cx + 0.1, AXIS_Y + 0.33, 0.12]} rotation={[0.7, 0, 0]} visible={false}>
             <coneGeometry args={[0.03, 0.4, 12, 1, true]} />
             <meshBasicMaterial color="#c6e8a8" transparent opacity={0.35} depthWrite={false} />
           </mesh>
-          <C r={0.12} h={0.03} m={M.steelDark} position={[cx - 0.12, AXIS_Y + R_GROUND + 0.05, 0]} rotation={[0, 0, Math.PI / 2]} />
         </Clickable>
       )}
       <SensorIndicator id="interferometer" channel="diam" machine="ingot-grinder" position={[cx + 0.12, AXIS_Y + 0.36, 0]} size={0.07} />
@@ -267,14 +779,185 @@ function Grinder({ variant }: { variant: string }) {
 /** Visual spacing is exaggerated (real pitch ≈ 1.1 mm) so individual wafers and kerf gaps are visible. */
 const N_WAFERS = 64;
 const PITCH = 0.0056;
+const SPAN = N_WAFERS * PITCH;
+const WIRE_Y = 0.95;
+const ROLLERS: [number, number][] = [
+  [-0.5, WIRE_Y],
+  [0.5, WIRE_Y],
+  [0, 0.42],
+];
+
+/** Saw frame: cast bed, slurry pan, side towers, top beam with feed unit, roller bearings, doors, utilities. */
+function buildSawFrame(k: Kit) {
+  // cast bed with recessed kick plate, slurry pan
+  k.box(KM.paintGraphite, [2.62, 0.06, 1.52], [0, 0.03, -0.05]);
+  k.rbox(KM.paintGrey, [2.7, 0.19, 1.6], 0.02, [0, 0.155, -0.05]);
+  k.box(KM.seam, [1.7, 0.003, 0.9], [0, 0.2515, 0], [0, 0, 0], { cast: false });
+  for (const s of [-1, 1]) {
+    k.box(KM.stainless, [1.73, 0.06, 0.012], [0, 0.28, s * 0.45]);
+    k.box(KM.stainless, [0.012, 0.06, 0.9], [s * 0.86, 0.28, 0]);
+  }
+  k.cyl(KM.stainlessDark, 0.03, 0.006, [0.6, 0.254, 0.3], [0, 0, 0], 16);
+  // side towers (drives, wire management, electrics)
+  for (const s of [-1, 1])
+    k.at([s * 1.2, 0.25, -0.1], 0, () => {
+      k.rbox(KM.paint, [0.25, 2.05, 1.4], 0.02, [0, 1.025, 0]);
+      for (const y of [0.62, 1.42]) k.box(KM.seam, [0.22, 0.004, 0.002], [0, y, 0.7012], [0, 0, 0], { cast: false });
+      for (const z of [-0.23, 0.23]) k.box(KM.seam, [0.002, 1.98, 0.004], [s * 0.1262, 1.025, z], [0, 0, 0], { cast: false });
+      k.box(KM.seam, [0.002, 0.004, 1.36], [s * 0.1262, 0.7, 0], [0, 0, 0], { cast: false });
+      for (const [y, z] of [[0.08, -0.65], [0.08, 0.65], [1.97, -0.65], [1.97, 0.65], [0.08, 0], [1.97, 0]] as const) k.cyl(KM.stainlessDark, 0.0055, 0.004, [s * 0.127, y, z], RX, 8);
+      k.at([s * 0.127, 0.38, 0], [0, s * Math.PI / 2, 0], () => grille(k, 0.62, 0.36, [0, 0, 0]));
+      k.at([s * 0.127, 1.45, 0.42], [0, s * Math.PI / 2, 0], () => grille(k, 0.3, 0.42, [0, 0, 0], { pitch: 0.03 }));
+    });
+  // top beam and feed unit
+  k.rbox(KM.paint, [2.7, 0.3, 1.42], 0.02, [0, 2.45, -0.1]);
+  k.rbox(KM.paintGraphite, [2.72, 0.022, 1.44], 0.006, [0, 2.611, -0.1]);
+  k.box(KM.paintAccent, [2.66, 0.014, 0.003], [0, 2.56, 0.6115], [0, 0, 0], { cast: false });
+  k.label('model', 'MWS-300', 'MULTI-WIRE SAW · 300 mm', 0.44, 0.1, [0.62, 2.44, 0.612]);
+  k.label('warn', 'MOVING WIRE', '', 0.13, 0.13, [-0.62, 2.44, 0.612]);
+  ledStrip(k, 0.5, [-0.05, 2.36, 0.612]);
+  k.box(KM.ledWhite, [1.9, 0.012, 0.05], [0, 2.295, 0.42], [0, 0, 0], { cast: false });
+  k.rbox(KM.paint, [0.56, 0.42, 0.5], 0.02, [0, 2.09, -0.05]);
+  k.box(KM.seam, [0.562, 0.004, 0.502], [0, 2.0, -0.05], [0, 0, 0], { cast: false });
+  bellows(k, 0.1, 0.12, 6, [0, 1.76, 0], KM.paintGraphite);
+  k.cyl(KM.stainless, 0.12, 0.012, [0, 1.882, 0], [0, 0, 0], 32);
+  // stainless back wall of the cutting chamber
+  k.box(KM.stainlessDark, [2.15, 2.05, 0.05], [0, 1.275, -0.78]);
+  // roller bearing housings (back) and front bearing caps
+  for (const [x, y] of ROLLERS) {
+    k.cyl(KM.stainlessDark, 0.1, 0.46, [x, y, -0.52], RZ, 32);
+    k.cyl(KM.stainless, 0.13, 0.025, [x, y, -0.2775], RZ, 40);
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      k.cyl(KM.stainlessDark, 0.008, 0.012, [x + Math.cos(a) * 0.112, y + Math.sin(a) * 0.112, -0.26], RZ, 6);
+    }
+    k.cyl(KM.stainlessDark, 0.06, 0.055, [x, y, 0.2825], RZ, 24);
+    k.cyl(KM.stainless, 0.03, 0.01, [x, y, 0.315], RZ, 16);
+  }
+  for (const s of [-1, 1]) k.rbox(KM.paintGrey, [0.575, 0.045, 0.04], 0.01, [s * 0.7875, WIRE_Y, 0.2825]);
+  k.rbox(KM.paintGrey, [0.05, 0.17, 0.04], 0.01, [0, 0.335, 0.2825]);
+  // wire path: spools → dancer pulleys → guide pulleys → web
+  for (const s of [-1, 1]) {
+    k.tube(KM.steel, [[s * 0.75, 1.8, 0.55], [s * 0.55, 1.77, 0.6], [s * 0.47, 1.33, 0.27], [s * 0.5, 1.12, 0.2]], 0.0016, { radial: 4, tension: 0 });
+    k.cyl(KM.stainless, 0.04, 0.016, [s * 0.47, 1.3, 0.27], RZ, 20);
+    k.cyl(KM.paintGrey, 0.008, 0.6, [s * 0.775, 1.3, 0.27], RX, 8);
+  }
+  // parked sliding doors and their tracks
+  for (const s of [-1, 1]) {
+    windowPane(k, 0.28, 1.85, [s * 1.26, 1.33, 0.64], { frame: KM.anodizedDark, glass: KM.glass });
+    k.rbox(KM.stainless, [0.025, 0.3, 0.035], 0.008, [s * 1.12, 1.3, 0.665]);
+  }
+  k.box(KM.anodizedDark, [2.9, 0.04, 0.04], [0, 2.29, 0.64]);
+  k.box(KM.anodizedDark, [2.9, 0.02, 0.03], [0, 0.26, 0.64]);
+  // operator HMI on a swing arm, EMOs
+  const yaw = -0.5;
+  const hp: V3 = [1.55, 1.45, 0.78];
+  hmi(k, hp, yaw);
+  const ax = hp[0] + 0.22 * Math.sin(yaw);
+  const az = hp[2] - 0.22 * Math.cos(yaw);
+  k.pipe(KM.anodizedDark, [[ax, hp[1], az], [ax, hp[1], 0.42], [1.33, hp[1], 0.42]], 0.018, 0.05);
+  for (const s of [-1, 1]) k.at([s * 1.326, 1.1, 0.35], [0, s * Math.PI / 2, 0], () => estop(k, [0, 0, 0]));
+  // slurry tank with agitator and supply line to the nozzle manifold
+  k.at([1.95, 0, -1.15], 0, () => {
+    for (const [x, z] of [[-0.22, -0.22], [0.22, -0.22], [-0.22, 0.22], [0.22, 0.22]]) k.box(KM.stainless, [0.04, 0.12, 0.04], [x, 0.06, z]);
+    k.cyl(KM.plasticWhite, 0.32, 0.86, [0, 0.55, 0], [0, 0, 0], 40);
+    k.cyl(KM.stainless, 0.335, 0.03, [0, 0.995, 0], [0, 0, 0], 40);
+    for (const y of [0.32, 0.62, 0.9]) k.torus(KM.stainless, 0.322, 0.006, [0, y, 0], [0, 0, 0], 40);
+    k.at([0, 1.01, 0], 0, () => motor(k, 0.07, 0.22));
+    k.label('info', 'SLURRY TANK', 'PEG + SiC · AGITATED', 0.3, 0.075, [0, 0.62, 0.322]);
+  });
+  k.pipe(KM.stainless, [[1.75, 0.98, -1.1], [1.75, 1.75, -1.1], [1.75, 1.75, -0.86], [-0.4, 1.75, -0.86]], 0.02, 0.08);
+  k.ao(2.9, 1.75, [0, 0, -0.05], 1.15);
+  k.ao(0.8, 0.8, [1.95, 0, -1.15]);
+}
+
+/** Grooved wire guide (rotates about its own axis): PU-coated roller, wire grooves, flanges, hub bolts. */
+function buildRoller(k: Kit) {
+  const half = (SPAN + 0.08) / 2;
+  k.cyl(KM.paintWarm, 0.168, half * 2, [0, 0, 0], RZ, 48);
+  for (let i = 0; i < N_WAFERS; i += 4) k.add(KM.seam, new THREE.TorusGeometry(0.1685, 0.0012, 3, 48), [0, 0, -SPAN / 2 + i * PITCH], [0, 0, 0], [1, 1, 1], { cast: false });
+  for (const e of [-1, 1]) {
+    k.cyl(KM.stainless, 0.172, 0.012, [0, 0, e * (half + 0.006)], RZ, 48);
+    k.cyl(KM.stainlessDark, 0.07, 0.012, [0, 0, e * (half + 0.018)], RZ, 32);
+  }
+  for (let i = 0; i < 6; i++) {
+    const a = (i / 6) * Math.PI * 2;
+    k.cyl(KM.stainless, 0.008, 0.01, [Math.cos(a) * 0.05, Math.sin(a) * 0.05, half + 0.027], RZ, 6);
+  }
+  k.box(KM.seam, [0.02, 0.05, 0.004], [0, 0.14, half + 0.0125], [0, 0, 0], { cast: false });
+}
+
+/** Supply and take-up spools with their gearmotor housings. */
+function buildSpools(k: Kit) {
+  for (const s of [-1, 1]) {
+    k.at([s * 0.75, 2.0, 0.55], [Math.PI / 2, 0, 0], () => {
+      k.cyl(KM.brass, 0.195, 0.24, [0, 0, 0], [0, 0, 0], 48);
+      for (const e of [-1, 1]) k.cyl(KM.stainless, 0.22, 0.02, [0, e * 0.13, 0], [0, 0, 0], 48);
+      k.cyl(KM.stainlessDark, 0.06, 0.05, [0, 0.16, 0], [0, 0, 0], 20);
+      for (let i = 0; i < 5; i++) {
+        const a = (i / 5) * Math.PI * 2;
+        k.cyl(KM.seam, 0.03, 0.022, [Math.cos(a) * 0.135, 0.131, Math.sin(a) * 0.135], [0, 0, 0], 14);
+      }
+    });
+    k.rbox(KM.paint, [0.34, 0.34, 0.16], 0.02, [s * 0.75, 2.0, 0.33]);
+    k.rbox(KM.paint, [0.2, 0.16, 0.12], 0.02, [s * 0.75, 2.23, 0.33]);
+    k.cyl(KM.stainlessDark, 0.03, 0.08, [s * 0.75, 2.0, 0.42], RZ, 16);
+  }
+}
+
+/** Dancer arms with pivot hubs and grooved pulleys. */
+function buildDancers(k: Kit) {
+  for (const s of [-1, 1]) {
+    k.rbox(KM.paintYellow, [0.52, 0.045, 0.035], 0.012, [s * 0.75, 1.7, 0.6], [0, 0, -s * 0.4]);
+    k.cyl(KM.stainlessDark, 0.035, 0.08, [s * 0.98, 1.603, 0.585], RZ, 20);
+    k.box(KM.stainlessDark, [0.14, 0.12, 0.02], [s * 1.02, 1.603, 0.545]);
+    k.cyl(KM.stainless, 0.05, 0.02, [s * 0.52, 1.797, 0.625], RZ, 28);
+    k.cyl(KM.stainlessDark, 0.014, 0.05, [s * 0.52, 1.797, 0.61], RZ, 12);
+    k.torus(KM.stainlessDark, 0.05, 0.004, [s * 0.52, 1.797, 0.625], [-Math.PI / 2, 0, 0], 28);
+  }
+}
+
+/** Slurry curtain nozzles above the web and their feed lines through the back wall. */
+function buildSlurry(k: Kit) {
+  for (const s of [-1, 1]) {
+    k.rbox(KM.stainless, [0.06, 0.05, SPAN + 0.12], 0.01, [s * 0.31, 1.17, 0]);
+    k.box(KM.seam, [0.022, 0.004, SPAN + 0.06], [s * 0.295, 1.144, 0], [0, 0, 0], { cast: false });
+    k.pipe(KM.stainless, [[s * 0.31, 1.17, -0.24], [s * 0.31, 1.17, -0.6], [s * 0.31, 1.75, -0.6], [s * 0.31, 1.75, -0.88]], 0.016, 0.06);
+  }
+  k.label('gas', 'SLURRY', '', 0.14, 0.03, [0.31, 1.48, -0.582], [0, 0, 0], '#7a6a3a');
+}
+
+/** Work holder carried by the feed ram: glass glue beam, adapter plate, dovetail clamp, ram. */
+function buildFeedTable(k: Kit) {
+  const R = R_GROUND;
+  k.rbox(M.glassDark, [0.18, 0.06, SPAN + 0.04], 0.004, [0, R + 0.03, 0]);
+  k.rbox(KM.stainless, [0.3, 0.035, SPAN + 0.08], 0.006, [0, R + 0.0775, 0]);
+  k.rbox(KM.anodizedDark, [0.4, 0.07, SPAN + 0.1], 0.01, [0, R + 0.13, 0]);
+  for (const x of [-0.13, 0, 0.13]) k.cyl(KM.stainless, 0.012, 0.012, [x, R + 0.13, (SPAN + 0.1) / 2 + 0.005], RZ, 6);
+  k.rbox(KM.paint, [0.12, 0.835, 0.12], 0.012, [0, R + 0.5825, 0]);
+  for (const s of [-1, 1]) k.box(KM.stainless, [0.006, 0.8, 0.03], [s * 0.061, R + 0.6, 0]);
+}
+
+/** Output stand: stainless table with a PTFE tray and alignment posts for the as-cut stack. */
+function buildOutputStand(k: Kit) {
+  for (const [x, z] of [[-0.16, -0.16], [0.16, -0.16], [-0.16, 0.16], [0.16, 0.16]]) {
+    k.box(KM.stainless, [0.03, 0.86, 0.03], [x, 0.47, z]);
+    k.cyl(KM.rubber, 0.03, 0.03, [x, 0.03, z], RX, 14);
+  }
+  k.rbox(KM.stainless, [0.38, 0.02, 0.38], 0.004, [0, 0.25, 0]);
+  k.rbox(KM.stainless, [0.4, 0.025, 0.4], 0.005, [0, 0.9155, 0]);
+  k.rbox(KM.ptfe, [0.38, 0.02, 0.38], 0.006, [0, 0.938, 0]);
+  for (const a of [0, (2 * Math.PI) / 3, (4 * Math.PI) / 3]) k.cyl(KM.ptfe, 0.012, 0.35, [Math.cos(a) * 0.165, 0.948 + 0.175, Math.sin(a) * 0.165], [0, 0, 0], 12);
+  k.ao(0.4, 0.4);
+}
 
 function WireSaw() {
   const cx = X.saw;
   const viewRaw = useUI((s) => s.view);
   const cam = useUI((s) => s.cameraMode);
   const view = effectiveView(viewRaw, cam, 'normal');
-  const wirePlaneY = 0.95;
-  const span = N_WAFERS * PITCH; // block length along z
+  const wirePlaneY = WIRE_Y;
+  const span = SPAN; // block length along z
   // clipping: uncut block above the wire plane, slices below it
   const above = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), -wirePlaneY), []);
   const below = useMemo(() => new THREE.Plane(new THREE.Vector3(0, -1, 0), wirePlaneY), []);
@@ -343,7 +1026,7 @@ function WireSaw() {
       seg(k * 3 + 2, L, top, z);
     }
     wires.instanceMatrix.needsUpdate = true;
-  }, [wires, cx, span, o]);
+  }, [wires, cx, span, o, wirePlaneY]);
 
   useFrame((_, dt) => {
     const sid = engine.stage.id;
@@ -408,26 +1091,24 @@ function WireSaw() {
     stack.instanceMatrix.needsUpdate = true;
   });
 
-  const rollerPos: [number, number][] = [
-    [-0.5, wirePlaneY - 0.17],
-    [0.5, wirePlaneY - 0.17],
-    [0, 0.42 - 0.17],
-  ];
+  const frame = useModel(buildSawFrame);
+  const roller = useModel(buildRoller);
+  const spools = useModel(buildSpools);
+  const dancers = useModel(buildDancers);
+  const nozzles = useModel(buildSlurry);
+  const feed = useModel(buildFeedTable);
+  const stand = useModel(buildOutputStand);
+  const slurryDrop = useMemo(() => new THREE.MeshBasicMaterial({ color: '#9a9a8a' }), []);
   return (
     <group>
       <Clickable sel={{ kind: 'machine', id: 'wire-saw', label: 'Multi-wire saw' }}>
-        {/* frame */}
-        <B s={[2.6, 0.25, 1.6]} m={M.panelGrey} position={[cx, 0.125, 0]} />
-        <B s={[0.25, 2.6, 1.4]} m={M.panel} position={[cx - 1.2, 1.3, -0.1]} />
-        <B s={[0.25, 2.6, 1.4]} m={M.panel} position={[cx + 1.2, 1.3, -0.1]} />
-        <B s={[2.6, 0.3, 1.4]} m={M.panel} position={[cx, 2.45, -0.1]} />
-        <B s={[2.2, 2.2, 0.08]} m={M.panel} position={[cx, 1.35, -0.78]} />
+        <group position={[cx, 0, 0]}>
+          <Baked parts={frame} />
+        </group>
         {/* feed table + glue beam */}
         <Clickable sel={{ kind: 'component', id: 'feed-table', machine: 'wire-saw', label: 'Ingot feed table' }}>
           <group ref={blockGroup} position={[cx, 1.5, 0]}>
-            <B s={[0.18, 0.06, span + 0.04]} m={M.glassDark} position={[0, R_GROUND + 0.03, 0]} />
-            <B s={[0.4, 0.08, span + 0.1]} m={M.steelDark} position={[0, R_GROUND + 0.1, 0]} />
-            <B s={[0.12, 0.9, 0.12]} m={M.steel} position={[0, R_GROUND + 0.55, 0]} />
+            <Baked parts={feed} />
             {/* uncut block (above wire plane) */}
             <mesh rotation={[Math.PI / 2, 0, 0]} material={blockMat}>
               <cylinderGeometry args={[R_GROUND, R_GROUND, span, 64]} />
@@ -437,12 +1118,9 @@ function WireSaw() {
         </Clickable>
         {/* grooved wire guides */}
         <Clickable sel={{ kind: 'component', id: 'wire-guides', machine: 'wire-saw', label: 'Grooved wire guides' }}>
-          {rollerPos.map(([x, y], i) => (
-            <group key={i} position={[cx + x, y + 0.17, 0]} ref={(g) => { rollers.current[i] = g; }}>
-              <mesh rotation={[Math.PI / 2, 0, 0]} material={M.panelWarm}>
-                <cylinderGeometry args={[0.17, 0.17, span + 0.08, 40]} />
-              </mesh>
-              <B s={[0.02, 0.34, span + 0.09]} m={M.steelDark} />
+          {ROLLERS.map(([x, y], i) => (
+            <group key={i} position={[cx + x, y, 0]} ref={(g) => { rollers.current[i] = g; }}>
+              <Baked parts={roller} />
             </group>
           ))}
         </Clickable>
@@ -451,23 +1129,27 @@ function WireSaw() {
         </Clickable>
         {/* spools and tension arms */}
         <Clickable sel={{ kind: 'component', id: 'spools', machine: 'wire-saw', label: 'Supply & take-up spools' }}>
-          {[-0.75, 0.75].map((x) => (
-            <C key={x} r={0.22} h={0.3} m={M.steel} position={[cx + x, 2.0, 0.55]} rotation={[Math.PI / 2, 0, 0]} />
-          ))}
+          <group position={[cx, 0, 0]}>
+            <Baked parts={spools} />
+          </group>
         </Clickable>
         <Clickable sel={{ kind: 'component', id: 'tension', machine: 'wire-saw', label: 'Tension control (dancer arms)' }}>
-          <B s={[0.5, 0.04, 0.04]} m={M.yellow} position={[cx - 0.75, 1.7, 0.6]} rotation={[0, 0, 0.4]} />
-          <B s={[0.5, 0.04, 0.04]} m={M.yellow} position={[cx + 0.75, 1.7, 0.6]} rotation={[0, 0, -0.4]} />
+          <group position={[cx, 0, 0]}>
+            <Baked parts={dancers} />
+          </group>
         </Clickable>
         <Clickable sel={{ kind: 'component', id: 'slurry', machine: 'wire-saw', label: 'Slurry / coolant nozzles' }}>
-          <B s={[0.9, 0.05, span + 0.05]} m={M.steelDark} position={[cx, 1.48, 0]} />
+          <group position={[cx, 0, 0]}>
+            <Baked parts={nozzles} />
+          </group>
         </Clickable>
         <SignalTower position={[cx + 1.2, 2.6, -0.5]} />
       </Clickable>
-      <instancedMesh ref={slurry} args={[GEO.sphereLow, new THREE.MeshBasicMaterial({ color: '#9a9a8a' }), 40]} />
-      {/* output cassette */}
-      <B s={[0.36, 0.04, 0.36]} m={M.plastic} position={[cx + 1.75, 0.93, -0.2]} />
-      <B s={[0.36, 0.9, 0.36]} m={M.panelGrey} position={[cx + 1.75, 0.45, -0.2]} />
+      <instancedMesh ref={slurry} args={[GEO.sphereLow, slurryDrop, 40]} />
+      {/* output stand */}
+      <group position={[cx + 1.75, 0, -0.2]}>
+        <Baked parts={stand} />
+      </group>
       <primitive object={stack} />
       <group ref={followed} visible={false}>
         <Clickable sel={{ kind: 'wafer', id: 'wafer', label: 'WF-000184 (as-cut)' }}>
@@ -502,4 +1184,3 @@ export default function IngotScene({ stage }: SceneProps) {
     </>
   );
 }
-
