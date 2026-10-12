@@ -1,12 +1,14 @@
 'use client';
 /**
- * Renders a built kit: one mesh per finish. Shell parts follow the x-ray / cut-away
- * view modes through the shared material library.
+ * Renders a built kit: one mesh per finish, plus one shadow-only caster for the whole
+ * model. Shell parts follow the x-ray / cut-away view modes through the shared material
+ * library.
  */
 import { useEffect, useMemo } from 'react';
 import type { ViewMode } from '@/types';
 import { shell } from '../materials';
 import { Kit, type BakedPart } from './build';
+import { casterGeometry, shadowOnly } from './shadow';
 
 /** Build a static model once (per deps) and free its geometry on unmount. */
 export function useKit(fn: (k: Kit) => void, deps: unknown[] = []): BakedPart[] {
@@ -21,11 +23,17 @@ export function useKit(fn: (k: Kit) => void, deps: unknown[] = []): BakedPart[] 
 }
 
 export function Baked({ parts, view = 'normal' }: { parts: BakedPart[]; view?: ViewMode }) {
+  const caster = useMemo(() => {
+    const g = casterGeometry(parts.filter((p) => p.cast).map((p) => p.geometry));
+    return g ? shadowOnly(g) : null;
+  }, [parts]);
+  useEffect(() => () => caster?.geometry.dispose(), [caster]);
   return (
     <>
       {parts.map((p, i) => (
-        <mesh key={i} geometry={p.geometry} material={p.shell ? shell(p.material, view) : p.material} castShadow={p.cast} receiveShadow />
+        <mesh key={i} geometry={p.geometry} material={p.shell ? shell(p.material, view) : p.material} receiveShadow />
       ))}
+      {caster && <primitive object={caster} />}
     </>
   );
 }

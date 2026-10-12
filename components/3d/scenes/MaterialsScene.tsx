@@ -11,17 +11,19 @@
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
+import type { ViewMode } from '@/types';
 import type { SceneProps } from '../SceneSwitcher';
 import { Lighting, Hall } from '../environments';
-import { M } from '../materials';
+import { M, shell } from '../materials';
 import { GEO, type V3 } from '../parts/primitives';
 import { Clickable, SensorIndicator, TechLabel } from '../parts/interaction';
 import { Inset, FlowLine } from '../parts/section';
 import { AtomModel, silicaNetwork, tcsMolecule, diamondLattice, type Atom } from '../parts/atoms';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
-import { Kit, type BakedPart, type PartOpts, cabinet, boltCircle, viewport, bellows, grille, windowPane, iBeam, handrail, gasStick, hmi, estop, ledStrip } from '../kit/build';
+import { ConvexGeometry } from 'three/examples/jsm/geometries/ConvexGeometry.js';
+import { Kit, type BakedPart, type PartOpts, cabinet, boltCircle, viewport, bellows, grille, windowPane, iBeam, gasStick, hmi, estop, ledStrip } from '../kit/build';
 import { KM, labelMaterial } from '../kit/finish';
-import { Baked, useKit } from '../kit/Baked';
+import { casterGeometry, shadowOnly } from '../kit/shadow';
 import { useUI } from '@/lib/store';
 import { engine } from '@/simulation/engine';
 import { pp, inPhase, pdt } from '@/lib/anim';
@@ -66,24 +68,47 @@ const clad = (() => {
   m.roughness = 0.55;
   return m;
 })();
+/** particle effects (module-level so re-renders don't rebuild the instanced meshes) */
+const sprayMat = new THREE.MeshBasicMaterial({ color: '#cfe8e0', transparent: true, opacity: 0.7 });
+const smokeMat = new THREE.MeshStandardMaterial({ color: '#8a8f86', transparent: true, opacity: 0.25, depthWrite: false });
+const bubbleMat = new THREE.MeshStandardMaterial({ color: '#e6efd8', transparent: true, opacity: 0.6 });
+const impMat = new THREE.MeshBasicMaterial({ color: '#ffffff' });
+const HEAVY_COL = new THREE.Color('#c9733a');
+const LIGHT_COL = new THREE.Color('#d6c35a');
+const _pp = new THREE.Vector3();
+/** polished stainless of the bell jar: brighter and more metallic than the process piping */
+const jarSteel = (() => {
+  const m = KM.stainless.clone();
+  m.color.set('#dfe3e6');
+  m.metalness = 0.82;
+  m.roughness = 0.24;
+  return m;
+})();
 const gravelMat = new THREE.MeshStandardMaterial({ color: '#b9b5aa', roughness: 0.96, metalness: 0 });
 /** furnace burden (quartz + coke + wood chips) below the visible charge surface */
 const burdenMat = new THREE.MeshStandardMaterial({ color: '#3a2e26', roughness: 0.95, metalness: 0 });
 
-const rockGeo = (() => {
-  const g = new THREE.IcosahedronGeometry(1, 0);
-  const p = g.attributes.position;
-  const r = rng(4);
-  const seen = new Map<string, number>();
-  for (let i = 0; i < p.count; i++) {
-    const k = `${p.getX(i).toFixed(3)},${p.getY(i).toFixed(3)},${p.getZ(i).toFixed(3)}`;
-    const f = seen.get(k) ?? 0.6 + r() * 0.8;
-    seen.set(k, f);
-    p.setXYZ(i, p.getX(i) * f, p.getY(i) * f * 0.8, p.getZ(i) * f);
+/** Crushed-rock chunk: convex hull of random points (sharp edges, flat fracture faces, ~30 triangles). */
+function hullRock(seed: number, n: number, squash: number) {
+  const r = rng(seed);
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i < n; i++) {
+    const u = r() * 2 - 1;
+    const t = r() * Math.PI * 2;
+    const q = Math.sqrt(1 - u * u);
+    const d = 0.72 + r() * 0.34;
+    pts.push(new THREE.Vector3(Math.cos(t) * q * d, u * d * squash, Math.sin(t) * q * d));
   }
+  const g = new ConvexGeometry(pts);
   g.computeVertexNormals();
+  g.computeBoundingSphere();
   return g;
-})();
+}
+/** lumps on the belts, truck load, MG-Si and poly chunks */
+const rockGeo = hullRock(4, 14, 0.8);
+/** stockpile boulders */
+const pileGeo = hullRock(9, 18, 0.72);
+const PILE_TINTS = ['#f1efe8', '#e2ded4', '#ece3da', '#d6d4cd', '#f4f2ec'].map((c) => new THREE.Color(c));
 
 function Comp({ id, machine, label, children, position }: { id: string; machine: string; label: string; children: React.ReactNode; position?: V3 }) {
   return (
@@ -93,50 +118,126 @@ function Comp({ id, machine, label, children, position }: { id: string; machine:
   );
 }
 
-/**
- * useKit + a second merge: bins that share a finish (and shell flag) but differ only in the
- * cast-shadow flag become one mesh, so each finish costs one draw call per model.
- */
-function useModel(fn: (k: Kit) => void, deps: unknown[] = []): BakedPart[] {
-  const raw = useKit(fn, deps);
-  const parts = useMemo(() => {
-    const groups = new Map<string, BakedPart[]>();
-    for (const p of raw) {
+/* ======================================================================
+   Station models: one mesh per finish per STATION, picking and shadows by proxy.
+
+   Every static component of a station is built with the detailing kit, then all of a
+   station's bins that share a finish (and shell flag) are merged across components, so a
+   whole station costs one draw call per finish instead of one per finish per component.
+   Selection keeps working through invisible pick proxies (position-only copies of each
+   component, `visible = false`: never drawn, still raycast) inside the component's
+   Clickable. Shadows come from ONE position-only caster per station that is culled from the
+   camera pass and drawn only into the shadow map, instead of one depth pass per finish.
+   ====================================================================== */
+
+type Pieces = Record<string, (k: Kit) => void>;
+interface StationModel {
+  /** visible meshes: one per finish (shell parts kept apart for x-ray / cut-away) */
+  parts: BakedPart[];
+  /** per-component pick geometry (keys without a leading "_" are pickable) */
+  picks: Record<string, THREE.BufferGeometry>;
+  /** every shadow-casting part of the station, positions only */
+  caster: THREE.BufferGeometry | null;
+}
+
+/** Position-only concatenation (pick proxies, shadow casters). */
+function positionsOf(geos: THREE.BufferGeometry[]): THREE.BufferGeometry | null {
+  let n = 0;
+  for (const g of geos) n += g.attributes.position.count * 3;
+  if (!n) return null;
+  const arr = new Float32Array(n);
+  let o = 0;
+  for (const g of geos) {
+    const a = g.attributes.position.array as Float32Array;
+    arr.set(a, o);
+    o += a.length;
+  }
+  const out = new THREE.BufferGeometry();
+  out.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  out.computeBoundingSphere();
+  return out;
+}
+
+function buildStation(pieces: Pieces): StationModel {
+  const bins = new Map<string, { material: THREE.Material; shell: boolean; geos: THREE.BufferGeometry[] }>();
+  const picks: Record<string, THREE.BufferGeometry> = {};
+  const cast: THREE.BufferGeometry[] = [];
+  for (const [tag, fn] of Object.entries(pieces)) {
+    const k = new Kit();
+    fn(k);
+    const own: THREE.BufferGeometry[] = [];
+    for (const p of k.build()) {
       const key = `${p.material.uuid}:${p.shell ? 1 : 0}`;
-      const g = groups.get(key);
-      if (g) g.push(p);
-      else groups.set(key, [p]);
+      let b = bins.get(key);
+      if (!b) bins.set(key, (b = { material: p.material, shell: p.shell, geos: [] }));
+      b.geos.push(p.geometry);
+      own.push(p.geometry);
+      if (p.cast) cast.push(p.geometry);
     }
-    const out: BakedPart[] = [];
-    for (const g of groups.values()) {
-      if (g.length === 1) {
-        out.push(g[0]);
-        continue;
-      }
-      const geometry = mergeGeometries(g.map((p) => p.geometry), false);
-      if (!geometry) {
-        out.push(...g);
-        continue;
-      }
-      geometry.computeBoundingSphere();
-      out.push({ material: g[0].material, geometry, shell: g[0].shell, cast: g.some((p) => p.cast) });
+    if (!tag.startsWith('_')) {
+      const g = positionsOf(own);
+      if (g) picks[tag] = g;
     }
-    return out;
-  }, [raw]);
-  useEffect(() => () => parts.forEach((p) => !raw.includes(p) && p.geometry.dispose()), [parts, raw]);
-  return parts;
+  }
+  const caster = casterGeometry(cast);
+  const parts: BakedPart[] = [];
+  for (const b of bins.values()) {
+    const geometry = b.geos.length === 1 ? b.geos[0] : mergeGeometries(b.geos, false);
+    if (!geometry) continue;
+    if (geometry !== b.geos[0]) b.geos.forEach((g) => g.dispose());
+    geometry.computeBoundingSphere();
+    parts.push({ material: b.material, geometry, shell: b.shell, cast: false });
+  }
+  return { parts, picks, caster };
+}
+
+function useStation(pieces: Pieces, deps: unknown[] = []): StationModel {
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const m = useMemo(() => buildStation(pieces), deps);
+  useEffect(
+    () => () => {
+      m.parts.forEach((p) => p.geometry.dispose());
+      Object.values(m.picks).forEach((g) => g.dispose());
+      m.caster?.dispose();
+    },
+    [m],
+  );
+  return m;
+}
+
+const noRay = () => {};
+const PICK_MAT = new THREE.MeshBasicMaterial();
+
+/** Renders a station model. Not pickable unless asked (pick proxies handle selection). */
+function StationView({ m, view = 'normal', pickable = false }: { m: StationModel; view?: ViewMode; pickable?: boolean }) {
+  const caster = useMemo(() => (m.caster ? shadowOnly(m.caster) : null), [m]);
+  const ray = pickable ? {} : { raycast: noRay };
+  return (
+    <>
+      {m.parts.map((p, i) => (
+        <mesh key={i} geometry={p.geometry} material={p.shell ? shell(p.material, view) : p.material} receiveShadow {...ray} />
+      ))}
+      {caster && <primitive object={caster} />}
+    </>
+  );
+}
+
+/** Invisible pick proxy for one component of a station model. */
+function Pick({ m, tag }: { m: StationModel; tag: string }) {
+  const g = m.picks[tag];
+  return g ? <mesh geometry={g} material={PICK_MAT} visible={false} /> : null;
 }
 
 /* ------------------------------------------------------------ path movers */
 
-function pathPoint(path: V3[], t: number): THREE.Vector3 {
+function pathPoint(path: V3[], t: number, out: THREE.Vector3): THREE.Vector3 {
   const segs = path.length - 1;
   const x = clamp(t) * segs;
   const i = Math.min(segs - 1, Math.floor(x));
   const u = x - i;
   const a = path[i];
   const b = path[i + 1];
-  return new THREE.Vector3(a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u);
+  return out.set(a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u);
 }
 
 /* ======================================================================
@@ -151,22 +252,18 @@ const _up = new THREE.Vector3(0, 1, 0);
 const _qq = new THREE.Quaternion();
 const _ee = new THREE.Euler();
 
-/** Lathe profile with crisp corners: interior points are doubled so normals don't smear across edges. */
-function crisp(p: P2[]): P2[] {
-  const out: P2[] = [];
-  p.forEach((q, i) => {
-    out.push(q);
-    if (i > 0 && i < p.length - 1) {
-      const n = p[i + 1];
-      out.push([q[0] + (n[0] - q[0]) * 1e-3, q[1] + (n[1] - q[1]) * 1e-3]);
-    }
-  });
-  return out;
+/** Surface of revolution with hard edges: one band per profile edge, each with its own normals. */
+function crispLathe(k: Kit, m: THREE.Material, p: P2[], pos: V3 = [0, 0, 0], rot: V3 = [0, 0, 0], seg = 48, o: PartOpts = {}) {
+  for (let i = 0; i < p.length - 1; i++) {
+    const a = p[i];
+    const b = p[i + 1];
+    if (Math.hypot(b[0] - a[0], b[1] - a[1]) > 1e-6) k.lathe(m, [a, b], pos, rot, seg, o);
+  }
 }
 
 /** Washer / band around Y: radii r0..r1 between heights y0 and y1. */
 function ring(k: Kit, m: THREE.Material, r0: number, r1: number, y0: number, y1: number, seg = 48, o: PartOpts = {}) {
-  k.lathe(m, crisp([[r0, y0], [r1, y0], [r1, y1], [r0, y1], [r0, y0]]), [0, 0, 0], [0, 0, 0], seg, o);
+  crispLathe(k, m, [[r0, y0], [r1, y0], [r1, y1], [r0, y1], [r0, y0]], [0, 0, 0], [0, 0, 0], seg, o);
 }
 
 /** Local frame on a vertical vessel: radius R, angle a (from +X towards +Z), height y. Local +Z points outward. */
@@ -195,6 +292,88 @@ function rod(k: Kit, m: THREE.Material, a: V3, b: V3, r: number, seg = 12, o: Pa
   k.cyl(m, r, len, mid, rot, seg, o);
 }
 
+/** Radial segments for a round part of radius r: enough for its silhouette, no more. */
+const sg = (r: number) => Math.min(64, Math.max(8, 2 * Math.round((8 + r * 40) / 2)));
+
+const _pa = new THREE.Vector3();
+const _pb = new THREE.Vector3();
+const _pn = new THREE.Vector3();
+const _pc = new THREE.Vector3();
+const _px = new THREE.Vector3();
+const _pz = new THREE.Vector3();
+const _pm = new THREE.Matrix4();
+const elbowCache = new Map<string, THREE.TorusGeometry>();
+function elbowGeo(R: number, r: number, arc: number, radial: number) {
+  const key = `${R.toFixed(4)}:${r.toFixed(4)}:${arc.toFixed(3)}:${radial}`;
+  let g = elbowCache.get(key);
+  if (!g) elbowCache.set(key, (g = new THREE.TorusGeometry(R, r, radial, Math.max(2, Math.round(arc / (HP / 4))), arc)));
+  return g;
+}
+
+/**
+ * Process pipe through any-angle points: straight cylinders between bends and true torus
+ * elbows (bend radius `bend`) at the corners. A fraction of the triangles of a swept tube.
+ */
+function run(k: Kit, m: THREE.Material, pts: V3[], r: number, bend = 0.1, o: PartOpts = {}, radial = Math.min(14, sg(r))) {
+  let start: V3 = pts[0];
+  const last = pts.length - 1;
+  for (let i = 1; i <= last; i++) {
+    const c = pts[i];
+    let end: V3 = c;
+    let next: V3 | null = null;
+    if (i < last) {
+      _pa.set(c[0] - pts[i - 1][0], c[1] - pts[i - 1][1], c[2] - pts[i - 1][2]);
+      const lin = _pa.length();
+      _pa.normalize();
+      _pb.set(pts[i + 1][0] - c[0], pts[i + 1][1] - c[1], pts[i + 1][2] - c[2]);
+      const lout = _pb.length();
+      _pb.normalize();
+      const cos = clamp(_pa.dot(_pb), -1, 1);
+      const th = Math.acos(cos);
+      if (th > 1e-3 && th < Math.PI - 1e-3) {
+        const t = Math.min(bend * Math.tan(th / 2), lin * 0.5, lout * 0.5);
+        const R = t / Math.tan(th / 2);
+        end = [c[0] - _pa.x * t, c[1] - _pa.y * t, c[2] - _pa.z * t];
+        next = [c[0] + _pb.x * t, c[1] + _pb.y * t, c[2] + _pb.z * t];
+        // elbow frame: X from the bend centre to the start of the arc, Y along the incoming run
+        _pn.copy(_pb).addScaledVector(_pa, -cos).normalize();
+        _pc.set(end[0], end[1], end[2]).addScaledVector(_pn, R);
+        _px.copy(_pn).negate();
+        _pz.crossVectors(_px, _pa);
+        _pm.makeBasis(_px, _pa, _pz);
+        _ee.setFromRotationMatrix(_pm);
+        k.add(m, elbowGeo(R, r, th, radial), [_pc.x, _pc.y, _pc.z], [_ee.x, _ee.y, _ee.z], [1, 1, 1], { cast: r > 0.015, ...o });
+      }
+    }
+    const len = Math.hypot(end[0] - start[0], end[1] - start[1], end[2] - start[2]);
+    if (len > 1e-4) {
+      const [rot, , mid] = aim(start, end);
+      k.cyl(m, r, len, mid, rot, radial, { cast: r > 0.015, ...o, open: i !== 1 && i !== last });
+    }
+    if (next) start = next;
+  }
+}
+
+/** Tubular handrail (top + knee rail, posts ≤ 1.2 m apart, optional toe board) along a polyline. */
+function rail(k: Kit, pts: V3[], h = 1.05, m: THREE.Material = KM.paintYellow, toe = false) {
+  for (let i = 0; i < pts.length - 1; i++) {
+    const a = pts[i];
+    const b = pts[i + 1];
+    rod(k, m, [a[0], a[1] + h, a[2]], [b[0], b[1] + h, b[2]], 0.021, 8);
+    rod(k, m, [a[0], a[1] + h * 0.52, a[2]], [b[0], b[1] + h * 0.52, b[2]], 0.015, 6);
+    const len = Math.hypot(b[0] - a[0], b[2] - a[2]);
+    if (toe && Math.abs(b[1] - a[1]) < 1e-3) k.at([(a[0] + b[0]) / 2, a[1] + 0.05, (a[2] + b[2]) / 2], Math.atan2(b[0] - a[0], b[2] - a[2]), () => k.box(m, [0.008, 0.1, len], [0, 0, 0]));
+    const n = Math.max(1, Math.ceil(len / 1.2));
+    for (let j = i > 0 ? 1 : 0; j <= n; j++) {
+      const t = j / n;
+      const x = a[0] + (b[0] - a[0]) * t;
+      const y = a[1] + (b[1] - a[1]) * t;
+      const z = a[2] + (b[2] - a[2]) * t;
+      k.cyl(m, 0.02, h + 0.02, [x, y + (h + 0.02) / 2, z], [0, 0, 0], 8);
+    }
+  }
+}
+
 /** 2:1 ellipsoidal head profile from the rim at height y (dir 1 = up, -1 = down). */
 function head(r: number, y: number, dir: 1 | -1, n = 10): P2[] {
   const p: P2[] = [];
@@ -207,10 +386,10 @@ function head(r: number, y: number, dir: 1 | -1, n = 10): P2[] {
 
 /** Flanged nozzle along local +Z from the origin. */
 function nozzle(k: Kit, r: number, len: number, o: PartOpts = {}, m: THREE.Material = ss) {
-  k.cyl(m, r, len, [0, 0, len / 2], [HP, 0, 0], 16, o);
+  k.cyl(m, r, len, [0, 0, len / 2], [HP, 0, 0], sg(r), { ...o, open: true });
   const ft = Math.max(0.018, r * 0.4);
-  k.cyl(m, r * 1.8, ft, [0, 0, len - ft / 2], [HP, 0, 0], 20, o);
-  k.cyl(m, r * 1.8, ft, [0, 0, len + ft / 2 + 0.002], [HP, 0, 0], 20, o);
+  k.cyl(m, r * 1.8, ft, [0, 0, len - ft / 2], [HP, 0, 0], sg(r * 1.8), o);
+  k.cyl(m, r * 1.8, ft, [0, 0, len + ft / 2 + 0.002], [HP, 0, 0], sg(r * 1.8), o);
   const n = r > 0.07 ? 8 : 4;
   for (let i = 0; i < n; i++) {
     const a = (i / n) * TAU + 0.4;
@@ -220,9 +399,9 @@ function nozzle(k: Kit, r: number, len: number, o: PartOpts = {}, m: THREE.Mater
 
 /** Manway along local +Z: neck, bolted blind cover, davit and handle. */
 function manway(k: Kit, r: number, len: number, o: PartOpts = {}, m: THREE.Material = ss) {
-  k.cyl(m, r, len, [0, 0, len / 2], [HP, 0, 0], 28, o);
-  k.cyl(m, r * 1.3, 0.035, [0, 0, len], [HP, 0, 0], 32, o);
-  k.cyl(m, r * 1.3, 0.035, [0, 0, len + 0.037], [HP, 0, 0], 32, o);
+  k.cyl(m, r, len, [0, 0, len / 2], [HP, 0, 0], sg(r), { ...o, open: true });
+  k.cyl(m, r * 1.3, 0.035, [0, 0, len], [HP, 0, 0], sg(r * 1.3), o);
+  k.cyl(m, r * 1.3, 0.035, [0, 0, len + 0.037], [HP, 0, 0], sg(r * 1.3), o);
   for (let i = 0; i < 12; i++) {
     const a = (i / 12) * TAU;
     k.cyl(KM.stainlessDark, 0.011, 0.1, [Math.cos(a) * r * 1.16, Math.sin(a) * r * 1.16, len + 0.02], [HP, 0, 0], 6, { cast: false, ...o });
@@ -237,15 +416,15 @@ function cladding(k: Kit, R: number, y0: number, y1: number, o: PartOpts = {}, c
   const n = Math.max(1, Math.round((y1 - y0) / course));
   const h = (y1 - y0) / n;
   for (let i = 0; i < n; i++) {
-    k.cyl(clad, R + (i % 2) * 0.004, h, [0, y0 + (i + 0.5) * h, 0], [0, 0, 0], 48, { ...o, open: true });
-    if (i > 0) k.cyl(ss, R + 0.009, 0.02, [0, y0 + i * h, 0], [0, 0, 0], 48, { ...o, open: true, cast: false });
+    k.cyl(clad, R + (i % 2) * 0.004, h, [0, y0 + (i + 0.5) * h, 0], [0, 0, 0], sg(R), { ...o, open: true });
+    if (i > 0) k.cyl(ss, R + 0.009, 0.02, [0, y0 + i * h, 0], [0, 0, 0], sg(R), { ...o, open: true, cast: false });
   }
 }
 
 /** Grating platform around a vertical vessel: annular sector r0..r1 at height y from angle a0 to a1. */
 function circPlatform(k: Kit, r0: number, r1: number, y: number, a0: number, a1: number) {
   const arc = a1 - a0;
-  const n = Math.max(6, Math.ceil(arc / 0.1));
+  const n = Math.max(6, Math.ceil(arc / 0.14));
   const shape: P2[] = [];
   for (let i = 0; i <= n; i++) shape.push([Math.cos(a0 + (arc * i) / n) * r1, Math.sin(a0 + (arc * i) / n) * r1]);
   for (let i = n; i >= 0; i--) shape.push([Math.cos(a0 + (arc * i) / n) * r0, Math.sin(a0 + (arc * i) / n) * r0]);
@@ -256,7 +435,7 @@ function circPlatform(k: Kit, r0: number, r1: number, y: number, a0: number, a1:
   for (let i = 0; i <= bars; i++) radial(k, rm, a0 + (arc * i) / bars, y + 0.004, () => k.box(KM.stainlessDark, [0.012, 0.008, r1 - r0 - 0.03], [0, 0, 0], [0, 0, 0], { cast: false }));
   // toe plate and two-rail handrail
   k.add(KM.paintYellow, new THREE.CylinderGeometry(r1, r1, 0.1, n, 1, true, HP - a1, arc), [0, y + 0.05, 0]);
-  for (const hh of [0.55, 1.05]) k.at([0, y + hh, 0], [0, -a0, 0], () => k.add(KM.paintYellow, new THREE.TorusGeometry(r1 - 0.025, hh > 1 ? 0.02 : 0.015, 6, n, arc), [0, 0, 0], [HP, 0, 0]));
+  for (const hh of [0.55, 1.05]) k.at([0, y + hh, 0], [0, -a0, 0], () => k.add(KM.paintYellow, new THREE.TorusGeometry(r1 - 0.025, hh > 1 ? 0.02 : 0.015, 5, n, arc), [0, 0, 0], [HP, 0, 0]));
   const posts = Math.max(2, Math.ceil((arc * r1) / 1.1) + 1);
   for (let i = 0; i < posts; i++) {
     const a = a0 + (arc * i) / (posts - 1);
@@ -306,13 +485,13 @@ function valve(k: Kit, pos: V3, axis: 'x' | 'y' | 'z', r: number) {
   const along = (d: number): V3 => (axis === 'x' ? [d, 0, 0] : axis === 'y' ? [0, d, 0] : [0, 0, d]);
   const L = r * 3;
   k.at(pos, 0, () => {
-    k.cyl(KM.stainlessDark, r * 1.45, L, [0, 0, 0], rot, 16);
-    for (const s of [-1, 1]) k.cyl(ss, r * 1.9, r * 0.5, along((s * L) / 2), rot, 20);
+    k.cyl(KM.stainlessDark, r * 1.45, L, [0, 0, 0], rot, sg(r * 1.45));
+    for (const s of [-1, 1]) k.cyl(ss, r * 1.9, r * 0.5, along((s * L) / 2), rot, sg(r * 1.9));
     const sl = r * 4;
     const stem: V3 = axis === 'y' ? [sl / 2, 0, 0] : [0, sl / 2, 0];
     k.cyl(KM.stainlessDark, r * 0.7, sl, stem, axis === 'y' ? [0, 0, HP] : [0, 0, 0], 12);
     const hw: V3 = axis === 'y' ? [sl + 0.01, 0, 0] : [0, sl + 0.01, 0];
-    k.add(KM.paintRed, new THREE.TorusGeometry(r * 2.2, r * 0.2, 6, 20), hw, axis === 'y' ? [0, HP, 0] : [HP, 0, 0]);
+    k.add(KM.paintRed, new THREE.TorusGeometry(r * 2.2, r * 0.2, 5, 16), hw, axis === 'y' ? [0, HP, 0] : [HP, 0, 0]);
   });
 }
 
@@ -427,14 +606,15 @@ function tray(k: Kit, a: V3, b: V3, w = 0.4, cables = 5) {
   });
 }
 
-/** Hanging hose / flexible cable between two points (light catenary: 6 points, 6 sides). */
-function sagHose(k: Kit, a: V3, b: V3, r: number, sag: number, m: THREE.Material = KM.rubber) {
-  const pts: V3[] = [];
-  for (let i = 0; i <= 5; i++) {
-    const t = i / 5;
-    pts.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t - sag * 4 * t * (1 - t), a[2] + (b[2] - a[2]) * t]);
+/** Hanging hose / flexible cable between two points (light catenary, 6 sides, `segs` lengthwise). */
+function sagHose(k: Kit, a: V3, b: V3, r: number, sag: number, m: THREE.Material = KM.rubber, segs = 8) {
+  const pts: THREE.Vector3[] = [];
+  for (let i = 0; i <= 4; i++) {
+    const t = i / 4;
+    pts.push(new THREE.Vector3(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t - sag * 4 * t * (1 - t), a[2] + (b[2] - a[2]) * t));
   }
-  k.tube(m, pts, r, { radial: 6, tension: 0.5 });
+  const curve = new THREE.CatmullRomCurve3(pts, false, 'catmullrom', 0.5);
+  k.add(m, new THREE.TubeGeometry(curve, segs, r, 6, false), [0, 0, 0], [0, 0, 0], [1, 1, 1], { cast: r > 0.02 });
 }
 
 /* ======================================================================
@@ -541,8 +721,8 @@ function chute(k: Kit, a: V3, b: V3, w = 0.56) {
 /** Flywheel / sheave in the local XY plane (axis along Z), radius 0.6. */
 function buildFlywheel(k: Kit) {
   k.at([0, 0, 0], [HP, 0, 0], () => {
-    k.lathe(KM.paintGraphite, crisp([[0.5, -0.08], [0.6, -0.08], [0.6, 0.08], [0.5, 0.08], [0.5, -0.08]]), [0, 0, 0], [0, 0, 0], 48);
-    k.lathe(KM.steel, crisp([[0.594, -0.06], [0.61, -0.05], [0.61, 0.05], [0.594, 0.06]]), [0, 0, 0], [0, 0, 0], 48);
+    crispLathe(k, KM.paintGraphite, [[0.5, -0.08], [0.6, -0.08], [0.6, 0.08], [0.5, 0.08], [0.5, -0.08]], [0, 0, 0], [0, 0, 0], 48);
+    crispLathe(k, KM.steel, [[0.594, -0.06], [0.61, -0.05], [0.61, 0.05], [0.594, 0.06]], [0, 0, 0], [0, 0, 0], 48);
   });
   k.cyl(KM.paintGraphite, 0.15, 0.18, [0, 0, 0], [HP, 0, 0], 28);
   k.cyl(KM.steel, 0.085, 0.03, [0, 0, 0.1], [HP, 0, 0], 20);
@@ -808,8 +988,8 @@ function buildQuartzYard(k: Kit, P: V3[]) {
   }
   // wash-water pump behind the screen
   pump(k, [3.3, 0, -2.45], 0);
-  k.pipe(ss, [[2.35, 0.2, -1.38], [2.35, 0.2, -2.2], [2.35, 0.32, -2.45], [2.76, 0.32, -2.45]], 0.05, 0.1);
-  k.pipe(ss, [[3.05, 0.66, -2.45], [3.05, 1.6, -2.45], [5.05, 1.6, -2.45], [5.05, 1.6, -1.62], [5.05, 2.47, -1.62], [5.05, 2.47, -1.0], [4.85, 2.47, -1.0]], 0.035, 0.12);
+  run(k, ss, [[2.35, 0.2, -1.38], [2.35, 0.2, -2.2], [2.35, 0.32, -2.45], [2.76, 0.32, -2.45]], 0.05, 0.1);
+  run(k, ss, [[3.05, 0.66, -2.45], [3.05, 1.6, -2.45], [5.05, 1.6, -2.45], [5.05, 1.6, -1.62], [5.05, 2.47, -1.62], [5.05, 2.47, -1.0], [4.85, 2.47, -1.0]], 0.035, 0.12);
   valve(k, [3.05, 1.15, -2.45], 'y', 0.04);
   // transfer and loadout conveyors
   conveyor(k, [P[4][0] + 0.15, P[4][1] - 0.15 * 0.125, -1], [P[5][0] - 0.1, P[5][1] + 0.1 * 0.125, -1], { w: 0.72, legs: [4.75, 6.2], cord: true });
@@ -860,19 +1040,24 @@ function QuartzStation() {
   const cx = X.quartz;
   const pile = useMemo(() => {
     const r = rng(12);
-    const m = new THREE.InstancedMesh(rockGeo, quartzMat, 90);
+    const n = 130;
+    const m = new THREE.InstancedMesh(pileGeo, quartzMat, n);
     const o = new THREE.Object3D();
-    for (let i = 0; i < 90; i++) {
+    for (let i = 0; i < n; i++) {
       const a = r() * Math.PI * 2;
-      const d = Math.sqrt(r()) * 3;
-      const s = 0.25 + r() * 0.35;
-      o.position.set(cx - 7 + Math.cos(a) * d, s * 0.6 + (3 - d) * 0.5, -3 + Math.sin(a) * d * 0.8);
+      const d = Math.sqrt(r()) * 3.1;
+      const s = 0.17 + r() * r() * 0.42;
+      // rocks follow the cone of the heap, the bigger ones rolled to the toe
+      const dd = Math.min(3.2, d + s * 0.6);
+      o.position.set(cx - 7 + Math.cos(a) * dd, Math.max(s * 0.45, (3.1 - dd) * 0.44 + s * 0.35), -3 + Math.sin(a) * dd * 0.8);
       o.rotation.set(r() * 3, r() * 3, r() * 3);
-      o.scale.setScalar(s);
+      o.scale.set(s * (0.9 + r() * 0.3), s * (0.8 + r() * 0.3), s * (0.9 + r() * 0.3));
       o.updateMatrix();
       m.setMatrixAt(i, o.matrix);
+      m.setColorAt(i, PILE_TINTS[i % PILE_TINTS.length]);
     }
     m.castShadow = true;
+    m.receiveShadow = true;
     return m;
   }, [cx]);
   const PATH: V3[] = [
@@ -904,8 +1089,10 @@ function QuartzStation() {
     const wash = active && inPhase('wash', v);
     for (let i = 0; i < N; i++) {
       const u = (time.current * 0.06 + i / N) % 1;
-      const p = pathPoint(PATH, u);
-      o.position.copy(p).add(new THREE.Vector3(0, 0.12, ((i * 37) % 7) * 0.04 - 0.12));
+      const p = pathPoint(PATH, u, _pp);
+      o.position.copy(p);
+      o.position.y += 0.12;
+      o.position.z += ((i * 37) % 7) * 0.04 - 0.12;
       o.rotation.set(i, i * 2, 0);
       o.scale.setScalar(u < 0.33 ? 0.22 : 0.09);
       o.updateMatrix();
@@ -928,30 +1115,34 @@ function QuartzStation() {
     }
   });
   const local = (p: V3): V3 => [p[0] - cx, p[1], p[2]];
-  const yard = useModel((k) => k.at([cx, 0, 0], 0, () => buildQuartzYard(k, PATH.map(local))), [cx]);
-  const crusher = useModel((k) => k.at([cx - 0.4, 0, -1], 0, () => buildCrusher(k)), [cx]);
-  const fly = useModel(buildFlywheel, []);
-  const deckParts = useModel((k) => buildScreenDeck(k, cx, local(PATH[3]), local(PATH[4])), [cx]);
+  const st = useStation(
+    {
+      _yard: (k) => k.at([cx, 0, 0], 0, () => buildQuartzYard(k, PATH.map(local))),
+      crusher: (k) => k.at([cx - 0.4, 0, -1], 0, () => buildCrusher(k)),
+    },
+    [cx],
+  );
+  const fly = useStation({ fly: buildFlywheel }, []);
+  const deckParts = useStation({ _deck: (k) => buildScreenDeck(k, cx, local(PATH[3]), local(PATH[4])) }, [cx]);
   return (
     <group>
       <Clickable sel={{ kind: 'material', id: 'quartz', label: 'Quartz (SiO₂)' }}>
         <primitive object={pile} />
       </Clickable>
       <primitive object={lumps} />
-      {/* yard: conveyors, chute, screen frame, wash header, e-house, loadout truck */}
-      <Baked parts={yard} />
-      {/* jaw crusher */}
+      {/* yard: stockpile walls, conveyors, chute, screen frame, wash header, e-house, loadout truck + jaw crusher */}
+      <StationView m={st} />
       <Comp id="charge-feed" machine="arc-furnace" label="Jaw crusher">
-        <Baked parts={crusher} />
+        <Pick m={st} tag="crusher" />
         <group ref={flywheel} position={[cx - 0.4, 1.2, -0.12]}>
-          <Baked parts={fly} />
+          <StationView m={fly} pickable />
         </group>
       </Comp>
       {/* vibrating screen with wash sprays */}
       <group ref={deck}>
-        <Baked parts={deckParts} />
+        <StationView m={deckParts} />
       </group>
-      <instancedMesh ref={spray} args={[GEO.sphereLow, new THREE.MeshBasicMaterial({ color: '#cfe8e0', transparent: true, opacity: 0.7 }), 40]} />
+      <instancedMesh ref={spray} args={[GEO.sphereLow, sprayMat, 40]} />
       <TechLabel position={[cx - 7, 3.4, -3]} title="QUARTZITE STOCKPILE" lines={['high-purity silica (SiO₂)']} />
       <TechLabel position={[cx - 0.4, 3.0, -1]} title="CRUSHER" />
       <TechLabel position={[cx + 3.6, 2.7, -1]} title="SCREEN + WASH" lines={['fines & clay removed']} />
@@ -1057,11 +1248,11 @@ function buildArcPlant(k: Kit) {
   for (const x of [-3.975, 3.975]) k.box(KM.steel, [0.05, 0.05, 7.0], [x, 0.975, -0.5], [0, 0, 0], { cast: false });
   for (let i = 0; i < 4; i++) k.box(KM.steel, [1.0, 0.04, 0.3], [-2.8, 0.2 + i * 0.2, 4.05 - i * 0.3]);
   for (const x of [-3.32, -2.28]) strut(k, KM.paintYellow, [x, 0.0, 4.35], [x, 1.0, 3.0], 0.05);
-  handrail(k, [[-3.32, 0.2, 4.2], [-3.32, 1.0, 3.0]], 1.0);
-  handrail(k, [[-2.28, 0.2, 4.2], [-2.28, 1.0, 3.0]], 1.0);
-  handrail(k, [[1.3, 1.0, 2.94], [3.94, 1.0, 2.94], [3.94, 1.0, -3.94]], 1.05);
-  handrail(k, [[-3.94, 1.0, 2.94], [-3.94, 1.0, -3.94]], 1.05);
-  handrail(k, [[-2.2, 1.0, 2.94], [-1.3, 1.0, 2.94]], 1.05);
+  rail(k, [[-3.32, 0.2, 4.2], [-3.32, 1.0, 3.0]], 1.0, KM.paintYellow, true);
+  rail(k, [[-2.28, 0.2, 4.2], [-2.28, 1.0, 3.0]], 1.0, KM.paintYellow, true);
+  rail(k, [[1.3, 1.0, 2.94], [3.94, 1.0, 2.94], [3.94, 1.0, -3.94]], 1.05, KM.paintYellow, true);
+  rail(k, [[-3.94, 1.0, 2.94], [-3.94, 1.0, -3.94]], 1.05, KM.paintYellow, true);
+  rail(k, [[-2.2, 1.0, 2.94], [-1.3, 1.0, 2.94]], 1.05, KM.paintYellow, true);
   k.ao(8.4, 7.4, [0, 0, -0.5], 1.15);
   // furnace building steel: columns, girders, side bracing
   const colZ = [1.25, -1.75, -3.6];
@@ -1078,7 +1269,7 @@ function buildArcPlant(k: Kit) {
   // electrode floor (back bay) with toe boards and rails
   grating(k, 7.3, 1.75, [0, 7.72, -2.675]);
   k.box(KM.paintYellow, [7.3, 0.1, 0.01], [0, 7.77, -1.8]);
-  handrail(k, [[-3.6, 7.72, -1.82], [3.6, 7.72, -1.82]], 1.05);
+  rail(k, [[-3.6, 7.72, -1.82], [3.6, 7.72, -1.82]], 1.05, KM.paintYellow, true);
   // off-gas duct support portal
   for (const x of [2.85, 3.95]) k.box(KM.paintGrey, [0.14, 3.1, 0.14], [x, 2.55, -1.2]);
   girder(k, [2.75, 4.12, -1.2], [4.05, 4.12, -1.2], 0.2, 0.14);
@@ -1101,7 +1292,7 @@ function buildArcPlant(k: Kit) {
     // conservator + Buchholz pipe
     k.cyl(KM.paintGrey, 0.24, 1.6, [0.1, 2.75, -0.55], [0, 0, HP], 24);
     for (const x of [-0.5, 0.7]) k.box(KM.paintGrey, [0.08, 0.5, 0.08], [x, 2.5, -0.55]);
-    k.pipe(KM.paintGrey, [[0.1, 2.28, -0.3], [0.1, 2.45, -0.3], [0.1, 2.45, -0.55]], 0.035, 0.08);
+    run(k, KM.paintGrey, [[0.1, 2.28, -0.3], [0.1, 2.45, -0.3], [0.1, 2.45, -0.55]], 0.035, 0.08);
     // HV bushings (porcelain sheds)
     for (const x of [-0.6, 0, 0.6]) {
       const prof: P2[] = [[0.09, 0]];
@@ -1144,12 +1335,23 @@ function buildHearth(k: Kit) {
   for (let i = 0; i < 24; i++) radial(k, 0, ((i + 0.5) / 24) * TAU, 0, () => k.box(KM.paintDark, [0.03, 2.16, 0.1], [0, 2.3, 2.65], [0, 0, 0], sh));
   for (const y of [1.75, 2.75]) ring(k, KM.paintDark, 2.6, 2.73, y, y + 0.12, 64, sh);
   ring(k, KM.steel, 2.24, 2.76, 3.4, 3.48, 64, sh);
+  // bolted stiffening rings, spray-water collection gutter (open at the tap hole) with drains
+  for (const y of [1.75, 2.75]) boltCircle(k, 2.675, 48, y + 0.125, 0.011, KM.stainlessDark, { ...sh, cast: false });
+  const gutter: P2[] = [[2.62, 1.26], [2.95, 1.26], [2.95, 1.42], [2.92, 1.42], [2.92, 1.3], [2.62, 1.3]];
+  for (let i = 0; i < gutter.length - 1; i++) {
+    const g = new THREE.LatheGeometry([new THREE.Vector2(...gutter[i]), new THREE.Vector2(...gutter[i + 1])], 56, 0.5, TAU - 1.0);
+    k.add(KM.paintDark, g, [0, 0, 0], [0, 0, 0], [1, 1, 1], sh);
+  }
+  for (const sx of [-1, 1]) {
+    run(k, KM.paintGraphite, [[sx * 2.8, 1.27, -0.3], [sx * 2.8, 1.1, -0.3], [sx * 3.2, 1.1, -0.3], [sx * 3.2, 1.0, -0.3]], 0.04, 0.06, sh);
+    k.box(KM.steel, [0.22, 0.012, 0.22], [sx * 3.2, 1.006, -0.3], [0, 0, 0], { ...sh, cast: false });
+  }
   // spray-cooling ring header with drop nozzles
   k.torus(KM.paintBlue, 2.88, 0.045, [0, 3.3, 0], [0, 0, 0], 64, sh);
   for (let i = 0; i < 16; i++) radial(k, 2.88, (i / 16) * TAU + 0.1, 3.3, () => k.cyl(KM.paintBlue, 0.018, 0.12, [0, -0.07, 0], [0, 0, 0], 6, { ...sh, cast: false }));
   // refractory lining and the burden it holds (cut-away shows the crater)
-  k.lathe(refractory, crisp([[2.58, 3.4], [2.26, 3.4], [2.26, 1.45], [0.001, 1.45]]), [0, 0, 0], [0, 0, 0], 64, sh);
-  k.lathe(burdenMat, crisp([[2.255, 1.46], [2.255, 3.06], [0.001, 3.06]]), [0, 0, 0], [0, 0, 0], 48, sh);
+  crispLathe(k, refractory, [[2.58, 3.4], [2.26, 3.4], [2.26, 1.45], [0.001, 1.45]], [0, 0, 0], [0, 0, 0], 64, sh);
+  crispLathe(k, burdenMat, [[2.255, 1.46], [2.255, 3.06], [0.001, 3.06]], [0, 0, 0], [0, 0, 0], 48, sh);
   // arc craters at the electrode tips and the silicon pool on the hearth (interior)
   for (const [ex, ez] of ELEC) k.lathe(moltenMat, [[0.001, 2.25], [0.3, 2.32], [0.46, 2.55], [0.44, 2.75], [0.001, 2.8]], [ex, 0, ez], [0, 0, 0], 20, { cast: false });
   k.cyl(moltenMat, 1.7, 0.08, [0, 1.5, 0], [0, 0, 0], 40, { cast: false });
@@ -1170,7 +1372,7 @@ function buildHearth(k: Kit) {
 /** Water-cooled fume hood (shell) and the off-gas duct with flanges, bellows and damper. */
 function buildHood(k: Kit) {
   const sh = { shell: true };
-  k.lathe(KM.paintGrey, crisp([[2.8, 3.6], [1.8, 4.8], [1.74, 4.8], [2.74, 3.62], [2.8, 3.6]]), [0, 0, 0], [0, 0, 0], 64, sh);
+  crispLathe(k, KM.paintGrey, [[2.8, 3.6], [1.8, 4.8], [1.74, 4.8], [2.74, 3.62], [2.8, 3.6]], [0, 0, 0], [0, 0, 0], 64, sh);
   ring(k, KM.paintGraphite, 2.7, 2.92, 3.54, 3.64, 64, sh);
   ring(k, KM.paintGrey, 1.36, 1.86, 4.8, 4.86, 64, sh);
   ring(k, KM.steel, 1.32, 1.38, 4.7, 4.92, 48, sh);
@@ -1189,7 +1391,7 @@ function buildHood(k: Kit) {
       }),
     );
   // off-gas duct to the filter
-  k.pipe(KM.paintGrey, [[1.8, 4.6, -0.6], [3.4, 4.6, -1.2], [3.4, 6.5, -1.2]], 0.45, 0.55);
+  run(k, KM.paintGrey, [[1.8, 4.6, -0.6], [3.4, 4.6, -1.2], [3.4, 6.5, -1.2]], 0.45, 0.55, {}, 28);
   const yaw = Math.atan2(0.6, 1.6);
   for (const t of [0.15, 0.55]) k.at([1.8 + 1.6 * t, 4.6, -0.6 - 0.6 * t], [0, yaw, 0], () => k.at([0, 0, 0], [0, 0, -HP], () => ring(k, KM.paintGrey, 0.44, 0.53, -0.03, 0.03, 40)));
   k.at([3.4, 0, -1.2], 0, () => {
@@ -1256,6 +1458,13 @@ function buildChargeFeed(k: Kit) {
       k.box(KM.seam, [0.005, 1.2, 0.003], [-1.25 + i * 0.625, 8.87, 1.252], [0, 0, 0], { cast: false });
       k.box(KM.seam, [0.003, 1.2, 0.005], [1.252, 8.87, -1.25 + i * 0.625], [0, 0, 0], { cast: false });
     }
+    // vertical stiffeners on the visible faces, roof edge rail and a ladder from the electrode floor
+    for (const t of [-0.94, -0.31, 0.31, 0.94]) {
+      k.box(KM.paintGrey, [0.06, 1.24, 0.05], [t, 8.87, 1.275]);
+      k.box(KM.paintGrey, [0.05, 1.24, 0.06], [1.275, 8.87, t]);
+    }
+    rail(k, [[-1.24, 9.58, 1.24], [1.24, 9.58, 1.24], [1.24, 9.58, -1.24]], 1.0, KM.paintYellow, true);
+    k.at([1.3, 0, -0.6], HP, () => ladder(k, 7.72, 9.58, false));
     k.at([0, 7.72, 0], 0, () => hopper(k, 0.22, 1.24, 0.5, KM.paintGrey, KM.paintGrey));
     // bin vent filter and level radar on the roof
     k.cyl(KM.paint, 0.28, 0.6, [0.7, 9.9, -0.6], [0, 0, 0], 24);
@@ -1271,7 +1480,7 @@ function buildChargeFeed(k: Kit) {
   for (const a of [Math.PI + 0.26, Math.PI + 0.78]) {
     const end: V3 = [Math.cos(a) * 1.6, 4.92, Math.sin(a) * 1.6];
     const top: V3 = [bx, 7.25, bz];
-    k.pipe(KM.steel, [[bx, 7.6, bz], top, end], 0.12, 0.3);
+    run(k, KM.steel, [[bx, 7.6, bz], top, end], 0.12, 0.3);
     const mid: V3 = [(top[0] + end[0]) / 2, (top[1] + end[1]) / 2, (top[2] + end[2]) / 2];
     const [rot] = aim(top, end);
     k.at(mid, rot, () => {
@@ -1293,8 +1502,8 @@ function buildTap(k: Kit) {
   });
   for (const s of [-1, 1]) k.box(KM.paintGraphite, [0.07, 0.2, 0.07], [s * 0.24, 1.08, 2.95]);
   k.at([0, 0, 4.3], 0, () => {
-    k.lathe(KM.paintGraphite, crisp([[0.001, 0.18], [0.74, 0.18], [0.8, 1.22], [0.86, 1.24], [0.86, 1.32], [0.8, 1.32]]), [0, 0, 0], [0, 0, 0], 48);
-    k.lathe(refractory, crisp([[0.8, 1.32], [0.665, 1.32], [0.665, 0.32], [0.001, 0.32]]), [0, 0, 0], [0, 0, 0], 48);
+    crispLathe(k, KM.paintGraphite, [[0.001, 0.18], [0.74, 0.18], [0.8, 1.22], [0.86, 1.24], [0.86, 1.32], [0.8, 1.32]], [0, 0, 0], [0, 0, 0], 48);
+    crispLathe(k, refractory, [[0.8, 1.32], [0.665, 1.32], [0.665, 0.32], [0.001, 0.32]], [0, 0, 0], [0, 0, 0], 48);
     for (const y of [0.45, 0.9]) ring(k, KM.paintGraphite, 0.74, 0.83, y, y + 0.08, 48);
     for (const s of [-1, 1]) {
       k.cyl(KM.paintGraphite, 0.12, 0.08, [s * 0.83, 0.95, 0], [0, 0, HP], 20);
@@ -1355,6 +1564,8 @@ function ArcFurnace() {
     if (ladleFill.current) ladleFill.current.position.y = 0.6 + 0.65 * (tap > 0 ? Math.min(1, tap * 1.2) : 0) * (crush > 0 ? 0 : 1);
     if (ladleFill.current) ladleFill.current.visible = tap > 0 && crush === 0;
     if (smoke.current) {
+      // invisible (scaled to nothing) while cold: skip the draw entirely
+      smoke.current.visible = hot;
       smokeSeed.forEach((s, i) => {
         const u = (clock.current * 0.25 + s.o) % 1;
         o.position.set(cx + 3.4 + s.x + u * 0.8, 6.5 + u * 4, -1.2 + s.x);
@@ -1365,6 +1576,7 @@ function ArcFurnace() {
       smoke.current.instanceMatrix.needsUpdate = true;
     }
     if (chunks.current) {
+      chunks.current.visible = crush > 0;
       for (let i = 0; i < 40; i++) {
         const show = crush > i / 40;
         o.position.set(cx + 3.2 + (i % 8) * 0.18, 0.55 + Math.floor(i / 8) * 0.1, 3.6 + ((i * 3) % 5) * 0.16);
@@ -1378,37 +1590,35 @@ function ArcFurnace() {
     if (active) track('focus', cx, 3.2, 0);
   });
   const at = (fn: (k: Kit) => void) => (k: Kit) => k.at([cx, 0, 0], 0, () => fn(k));
-  const plant = useModel(at(buildArcPlant), [cx]);
-  const hearth = useModel(at(buildHearth), [cx]);
-  const hood = useModel(at(buildHood), [cx]);
-  const elec = useModel(at(buildElectrodes), [cx]);
-  const feed = useModel(at(buildChargeFeed), [cx]);
-  const tapParts = useModel(at(buildTap), [cx]);
-  const tray = useModel(at(buildChunkTray), [cx]);
+  const st = useStation(
+    { plant: at(buildArcPlant), hearth: at(buildHearth), hood: at(buildHood), elec: at(buildElectrodes), feed: at(buildChargeFeed), tap: at(buildTap), _tray: at(buildChunkTray) },
+    [cx],
+  );
   return (
     <group>
+      {/* pad, building steel, electrode floor, transformer vault, flexible bus, hearth, hood, electrodes, feed, tap, casting tray */}
+      <StationView m={st} view={view} />
       <Clickable sel={{ kind: 'machine', id: 'arc-furnace', label: 'Submerged arc furnace' }}>
-        {/* pad, building steel, electrode floor, transformer vault, flexible bus */}
-        <Baked parts={plant} />
+        <Pick m={st} tag="plant" />
         <Comp id="crucible" machine="arc-furnace" label="Refractory hearth">
-          <Baked parts={hearth} view={view} />
+          <Pick m={st} tag="hearth" />
           <mesh ref={charge} position={[cx, 3.1, 0]} rotation={[-Math.PI / 2, 0, 0]}>
             <circleGeometry args={[2.25, 40]} />
             <meshStandardMaterial color="#5a3a24" emissive="#ff6a1a" emissiveIntensity={0.15} roughness={0.8} toneMapped={false} />
           </mesh>
         </Comp>
         <Comp id="electrodes" machine="arc-furnace" label="Graphite electrodes">
-          <Baked parts={elec} />
+          <Pick m={st} tag="elec" />
         </Comp>
         <Comp id="hood" machine="arc-furnace" label="Fume hood">
-          <Baked parts={hood} view={view} />
+          <Pick m={st} tag="hood" />
         </Comp>
         <Comp id="charge-feed" machine="arc-furnace" label="Charge feed chutes">
-          <Baked parts={feed} />
+          <Pick m={st} tag="feed" />
         </Comp>
         <TechLabel position={[cx, 6.6, -4.5]} title="FURNACE TRANSFORMER" min={3} />
         <Comp id="tap-hole" machine="arc-furnace" label="Tap hole & ladle">
-          <Baked parts={tapParts} />
+          <Pick m={st} tag="tap" />
           <mesh ref={stream} position={[cx, 1.0, 3.8]} material={moltenMat} visible={false}>
             <cylinderGeometry args={[0.06, 0.09, 0.8, 12]} />
           </mesh>
@@ -1418,9 +1628,8 @@ function ArcFurnace() {
         </Comp>
         <pointLight ref={arcLight} position={[cx, 3.5, 0]} color="#ff8a3a" distance={14} decay={1.5} />
       </Clickable>
-      <instancedMesh ref={smoke} args={[GEO.sphereLow, new THREE.MeshStandardMaterial({ color: '#8a8f86', transparent: true, opacity: 0.25, depthWrite: false }), 60]} />
+      <instancedMesh ref={smoke} args={[GEO.sphereLow, smokeMat, 60]} />
       <instancedMesh ref={chunks} args={[rockGeo, mgSiMat, 40]} castShadow />
-      <Baked parts={tray} />
       <SensorIndicator id="thermocouple" channel="temp" machine="arc-furnace" position={[cx + 2.65, 2.6, 0.6]} size={0.18} />
       <TechLabel position={[cx + 3.6, 10.8, -1.2]} title="OFF-GAS · CO → CO₂ + SILICA FUME → FILTER" min={2} />
       <TechLabel position={[cx, 8.2, 0]} title="3 GRAPHITE ELECTRODES · ~2000 °C" lines={['carbothermic reduction']} />
@@ -1468,7 +1677,7 @@ function buildFBR(k: Kit) {
     circPlatform(k, R + 0.04, 1.32, 5.5, HP - 0.4, Math.PI + 0.25);
     radial(k, R + 0.27, Math.PI + 0.6, 0, () => ladder(k, 0, 5.5));
     // HCl inlet: bottom elbow → riser to the pipe rack
-    k.pipe(ss, [[0, 0.24, 0], [0, 0.14, 0], [0, 0.14, -2.9], [0, 5.2, -2.9], [0, 5.2, -3.15]], 0.06, 0.16);
+    run(k, ss, [[0, 0.24, 0], [0, 0.14, 0], [0, 0.14, -2.9], [0, 5.2, -2.9], [0, 5.2, -3.15]], 0.06, 0.16);
     valve(k, [0, 0.14, -1.4], 'z', 0.06);
     plate(k, 'gas', 'HCl', '', 0.28, 0.055, [0.075, 1.2, -2.9], [0, HP, 0], '#8a6a2a');
     k.ao(2.2, 2.2);
@@ -1489,12 +1698,12 @@ function buildFBR(k: Kit) {
       strut(k, KM.paintGrey, [-0.45, y, s * 0.45], [0.45, y + 1.6, s * 0.45], 0.045);
       strut(k, KM.paintGrey, [s * 0.45, y, -0.45], [s * 0.45, y + 1.6, 0.45], 0.045);
     }
-    k.pipe(ss, [[0, 4.92, 0], [0, 4.2, 0], [1.22, 3.6, 0]], 0.08, 0.2);
+    run(k, ss, [[0, 4.92, 0], [0, 4.2, 0], [1.22, 3.6, 0]], 0.08, 0.2);
     k.rbox(KM.stainlessDark, [0.18, 0.16, 0.18], 0.02, [0, 4.45, 0]);
   });
   // FBR outlet → cyclone, cyclone gas → condenser inlet
-  k.pipe(ss, [[-4, 6.3, -1], [-4, 6.55, -1], [-5.5, 6.55, -0.72]], 0.12, 0.2);
-  k.pipe(ss, [[-6, 7.35, -1], [-6, 7.5, -1], [-3.75, 7.5, -1], [-3.75, 6.8, -1], [-3.4, 6.8, -1]], 0.12, 0.25);
+  run(k, ss, [[-4, 6.3, -1], [-4, 6.55, -1], [-5.5, 6.55, -0.72]], 0.12, 0.2);
+  run(k, ss, [[-6, 7.35, -1], [-6, 7.5, -1], [-3.75, 7.5, -1], [-3.75, 6.8, -1], [-3.4, 6.8, -1]], 0.12, 0.25);
   // MG-Si lock hopper and screw feeder
   k.at([-5.5, 0, 0.4], 0, () => {
     for (const [x, z] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) k.box(KM.paintGrey, [0.08, 2.0, 0.08], [x * 0.3, 1.0, z * 0.3]);
@@ -1543,8 +1752,8 @@ function buildCondenser(k: Kit) {
     k.at([1.72, -0.45, 0], [HP, 0, 0], () => nozzle(k, 0.06, 0.12));
     k.at([0.6, 0.45, 0], [-HP, 0, 0], () => nozzle(k, 0.03, 0.1));
     // CW supply/return to the rack, colour bands
-    k.pipe(KM.paintAccent, [[1.1, -0.62, 0], [1.1, -0.9, 0], [1.1, -0.9, -3.0], [1.1, -1.72, -3.0], [1.1, -1.72, -3.3]], 0.07, 0.15);
-    k.pipe(KM.paintAccent, [[-1.1, 0.62, 0], [-1.1, 0.85, 0], [-1.1, 0.85, -3.0], [-1.1, -1.72, -3.0], [-1.1, -1.72, -3.13]], 0.07, 0.15);
+    run(k, KM.paintAccent, [[1.1, -0.62, 0], [1.1, -0.9, 0], [1.1, -0.9, -3.0], [1.1, -1.72, -3.0], [1.1, -1.72, -3.3]], 0.07, 0.15);
+    run(k, KM.paintAccent, [[-1.1, 0.62, 0], [-1.1, 0.85, 0], [-1.1, 0.85, -3.0], [-1.1, -1.72, -3.0], [-1.1, -1.72, -3.13]], 0.07, 0.15);
     k.cyl(KM.paintBlue, 0.078, 0.1, [1.1, -0.9, -1.2], [HP, 0, 0], 16);
     k.cyl(KM.paintRed, 0.078, 0.1, [-1.1, 0.85, -1.2], [HP, 0, 0], 16);
     plate(k, 'model', 'E-102', 'TCS CONDENSER · CW 18 °C', 0.5, 0.125, [0.2, 0.12, 0.462]);
@@ -1575,7 +1784,7 @@ function buildColumn(k: Kit, x: number, z: number, r: number, h: number) {
     k.cyl(ss, 0.05, 0.2, [0.25, top - 0.02, 0.1], [0, 0, 0], 12);
     k.rbox(KM.paintRed, [0.12, 0.16, 0.1], 0.015, [0.25, top + 0.15, 0.1]);
     // davit for lifting trays
-    k.pipe(KM.paintYellow, [[-R * 0.7, top - 0.15, -R * 0.5], [-R * 0.7, top + 1.2, -R * 0.5], [0, top + 1.2, -R * 0.5]], 0.04, 0.2);
+    run(k, KM.paintYellow, [[-R * 0.7, top - 0.15, -R * 0.5], [-R * 0.7, top + 1.2, -R * 0.5], [0, top + 1.2, -R * 0.5]], 0.04, 0.2);
     // manways towards the aisle
     for (const y of [1.9, h - 1.3]) radial(k, R, HP + 0.35, y, () => manway(k, 0.22, 0.2));
     // thermowells on +X and a magnetic level gauge near the sump
@@ -1631,7 +1840,7 @@ function buildTank(k: Kit) {
     k.at([0, 0.9, -1.0], [-HP, 0, 0], () => nozzle(k, 0.07, 0.18));
     k.at([0.2, 0.88, 0.3], [-HP, 0, 0], () => nozzle(k, 0.06, 0.16));
     k.rbox(KM.paintRed, [0.14, 0.2, 0.12], 0.015, [0.2, 1.18, 0.3]);
-    k.pipe(ss, [[0.2, 1.28, 0.3], [0.2, 1.6, 0.3], [0.2, 1.6, -0.6]], 0.04, 0.1);
+    run(k, ss, [[0.2, 1.28, 0.3], [0.2, 1.6, 0.3], [0.2, 1.6, -0.6]], 0.04, 0.1);
     k.at([-0.25, 0.88, 0.9], [-HP, 0, 0], () => nozzle(k, 0.05, 0.12));
     k.cyl(KM.anodized, 0.08, 0.16, [-0.25, 1.1, 0.9], [0, 0, 0], 16);
     k.at([0, 0.1, 1.72], 0, () => manway(k, 0.24, 0.15, {}, KM.paint));
@@ -1641,7 +1850,7 @@ function buildTank(k: Kit) {
     plate(k, 'info', 'TK-301 · SiHCl₃', 'PURE TCS · 9N · 40 m³', 0.7, 0.175, [0.905, 0.15, -0.5], [0, HP, 0]);
     plate(k, 'warn', 'FLAMMABLE', '', 0.24, 0.24, [0.905, 0.15, 0.25], [0, HP, 0]);
     // bottom outlet towards the Siemens reactors
-    k.pipe(ss, [[0, -0.88, 1.25], [0, -0.95, 1.25], [2.3, -0.95, 1.25]], 0.05, 0.06);
+    run(k, ss, [[0, -0.88, 1.25], [0, -0.95, 1.25], [2.3, -0.95, 1.25]], 0.05, 0.06);
     valve(k, [1.2, -0.95, 1.25], 'x', 0.05);
   });
   // containment bund with coated floor
@@ -1665,8 +1874,8 @@ function buildDistillPlant(k: Kit) {
   strut(k, KM.paintGrey, [sx[0] + 0.1, 0.2, sz[0]], [sx[1] - 0.1, 2.95, sz[0]], 0.07);
   strut(k, KM.paintGrey, [sx[0] + 0.1, 3.25, sz[0]], [sx[1] - 0.1, 6.0, sz[0]], 0.07);
   grating(k, 3.1, 1.95, [(sx[0] + sx[1]) / 2, 6.24, (sz[0] + sz[1]) / 2]);
-  handrail(k, [[sx[0] - 0.05, 6.24, sz[1] + 0.05], [-1.3, 6.24, sz[1] + 0.05]], 1.05);
-  handrail(k, [[-0.7, 6.24, sz[1] + 0.05], [sx[1] + 0.05, 6.24, sz[1] + 0.05], [sx[1] + 0.05, 6.24, sz[0] - 0.05]], 1.05);
+  rail(k, [[sx[0] - 0.05, 6.24, sz[1] + 0.05], [-1.3, 6.24, sz[1] + 0.05]], 1.05, KM.paintYellow, true);
+  rail(k, [[-0.7, 6.24, sz[1] + 0.05], [sx[1] + 0.05, 6.24, sz[1] + 0.05], [sx[1] + 0.05, 6.24, sz[0] - 0.05]], 1.05, KM.paintYellow, true);
   k.at([-1.0, 0, 0.12], 0, () => ladder(k, 0, 6.24));
   // pipe rack along the back: portals, two tiers, utility headers and a cable tray
   const rz = -4.2;
@@ -1696,8 +1905,8 @@ function buildDistillPlant(k: Kit) {
   tray(k, [-7.6, 3.42, rz], [7.6, 3.42, rz], 0.5, 6);
   // heavy-ends pump at the foot of column 1 and its discharge to the rack
   pump(k, [1.0, 0, -0.55], -HP);
-  k.pipe(ss, [[1.0, 0.32, -1.38], [1.0, 0.32, -1.1]], 0.06, 0.05);
-  k.pipe(ss, [[1.0, 0.66, -0.8], [1.0, 1.4, -0.8], [0.1, 1.4, -0.8], [0.1, 1.4, -3.9], [0.1, 5.15, -3.9]], 0.05, 0.12);
+  run(k, ss, [[1.0, 0.32, -1.38], [1.0, 0.32, -1.1]], 0.06, 0.05);
+  run(k, ss, [[1.0, 0.66, -0.8], [1.0, 1.4, -0.8], [0.1, 1.4, -0.8], [0.1, 1.4, -3.9], [0.1, 5.15, -3.9]], 0.05, 0.12);
   valve(k, [1.0, 1.0, -0.8], 'y', 0.05);
   // thermosiphon reboilers behind the columns, steam from the rack
   for (const [x, zc, cr] of [[1.0, -3.3, 0.6], [3.5, -3.2, 0.5]] as const) {
@@ -1709,36 +1918,26 @@ function buildDistillPlant(k: Kit) {
       k.lathe(clad, head(0.26, 0.6, -1), [0, 0, 0], [0, 0, 0], 24);
       ring(k, ss, 0.26, 0.34, 1.9, 1.96, 24);
     });
-    k.pipe(ss, [[x, 1.4, tip], [x, 1.4, zc + 0.36], [x, 0.38, zc + 0.36], [x, 0.38, zc], [x, 0.48, zc]], 0.06, 0.12);
-    k.pipe(ss, [[x, 2.27, zc], [x, 2.35, zc], [x, 2.35, tip]], 0.08, 0.05);
-    k.pipe(KM.anodized, [[x + 0.26, 1.7, zc], [x + 0.45, 1.7, zc], [x + 0.45, 1.7, rz + 0.3], [x + 0.45, 5.06, rz + 0.3]], 0.05, 0.1);
+    run(k, ss, [[x, 1.4, tip], [x, 1.4, zc + 0.36], [x, 0.38, zc + 0.36], [x, 0.38, zc], [x, 0.48, zc]], 0.06, 0.12);
+    run(k, ss, [[x, 2.27, zc], [x, 2.35, zc], [x, 2.35, tip]], 0.08, 0.05);
+    run(k, KM.anodized, [[x + 0.26, 1.7, zc], [x + 0.45, 1.7, zc], [x + 0.45, 1.7, rz + 0.3], [x + 0.45, 5.06, rz + 0.3]], 0.05, 0.1);
   }
   // condensate: condenser → column 1 feed
-  k.pipe(ss, [[0.22, 6.14, -1], [0.22, 5.6, -1], [0.463, 5.6, -1], [0.463, 3.0, -1], [0.463, 3.0, -1.463]], 0.06, 0.12);
+  run(k, ss, [[0.22, 6.14, -1], [0.22, 5.6, -1], [0.463, 5.6, -1], [0.463, 3.0, -1], [0.463, 3.0, -1.463]], 0.06, 0.12);
   valve(k, [0.463, 4.2, -1], 'y', 0.06);
   // column 1 overhead → column 2 feed
-  k.pipe(ss, [[1.707, 9.5, -1.72], [2.38, 9.5, -1.72], [2.38, 2.0, -1.72], [2.902, 2.0, -1.72]], 0.09, 0.2);
+  run(k, ss, [[1.707, 9.5, -1.72], [2.38, 9.5, -1.72], [2.38, 2.0, -1.72], [2.902, 2.0, -1.72]], 0.09, 0.2);
   for (const y of [8.0, 5.0]) k.cyl(ss, 0.15, 0.05, [2.38, y, -1.72], [0, 0, 0], 16);
   // column 2 product draw → storage tank (route of the flow line)
-  k.pipe(ss, [[3.5, 4.5, -1.34], [5.2, 4.5, -1.34], [6.5, 2.42, 0.0], [6.5, 2.3, 0.0]], 0.09, 0.25);
+  run(k, ss, [[3.5, 4.5, -1.34], [5.2, 4.5, -1.34], [6.5, 2.42, 0.0], [6.5, 2.3, 0.0]], 0.09, 0.25);
   valve(k, [4.4, 4.5, -1.34], 'x', 0.07);
   k.box(KM.paintGrey, [0.1, 3.3, 0.1], [5.86, 1.65, -0.67]);
   k.box(KM.paintGrey, [0.4, 0.08, 0.2], [5.86, 3.3, -0.67]);
   // column 2 light ends vent → rack
-  k.pipe(ss, [[3.5, 8.6, -2], [3.5, 8.9, -2], [3.5, 8.9, -4.0], [3.5, 5.25, -4.0]], 0.05, 0.15);
+  run(k, ss, [[3.5, 8.6, -2], [3.5, 8.9, -2], [3.5, 8.9, -4.0], [3.5, 5.25, -4.0]], 0.05, 0.15);
 }
 
 /* ------------------------------------------------------------ 3 · distillation */
-
-function Column({ x, z, r, h, label, id }: { x: number; z: number; r: number; h: number; label: string; id: string }) {
-  const view = useUI((s) => s.view);
-  const parts = useModel((k) => buildColumn(k, x, z, r, h), [x, z, r, h]);
-  return (
-    <Comp id={id} machine="fbr-distillation" label={label}>
-      <Baked parts={parts} view={view} />
-    </Comp>
-  );
-}
 
 function Distillation() {
   const cx = X.distill;
@@ -1752,6 +1951,7 @@ function Distillation() {
     const dist = active ? Math.max(pp('distill'), pp('store') > 0 ? 1 : 0) : 0;
     const on = active && (inPhase('distill') || inPhase('condense') || inPhase('react'));
     if (bubbles.current) {
+      bubbles.current.visible = on;
       for (let i = 0; i < 80; i++) {
         const col = i % 2;
         const x = col ? cx + 3.5 : cx + 1;
@@ -1765,6 +1965,7 @@ function Distillation() {
       bubbles.current.instanceMatrix.needsUpdate = true;
     }
     if (imp.current) {
+      imp.current.visible = on && dist < 0.98;
       // impurities: heavy ends sink to the bottom draw-off, light ends rise to the top vent
       for (let i = 0; i < 40; i++) {
         const heavy = i % 3 !== 0;
@@ -1775,7 +1976,7 @@ function Distillation() {
         o.scale.setScalar(on && dist < 0.98 ? 0.07 : 0.0001);
         o.updateMatrix();
         imp.current.setMatrixAt(i, o.matrix);
-        imp.current.setColorAt(i, new THREE.Color(heavy ? '#c9733a' : '#d6c35a'));
+        imp.current.setColorAt(i, heavy ? HEAVY_COL : LIGHT_COL);
       }
       imp.current.instanceMatrix.needsUpdate = true;
       if (imp.current.instanceColor) imp.current.instanceColor.needsUpdate = true;
@@ -1783,29 +1984,42 @@ function Distillation() {
     if (active) track('focus', cx + 1, 5, -2);
   });
   const at = (fn: (k: Kit) => void) => (k: Kit) => k.at([cx, 0, 0], 0, () => fn(k));
-  const plant = useModel(at(buildDistillPlant), [cx]);
-  const reactor = useModel(at(buildFBR), [cx]);
-  const cond = useModel(at(buildCondenser), [cx]);
-  const tank = useModel(at(buildTank), [cx]);
+  const view = useUI((s) => s.view);
+  const st = useStation(
+    {
+      plant: at(buildDistillPlant),
+      reactor: at(buildFBR),
+      cond: at(buildCondenser),
+      column1: (k) => buildColumn(k, cx + 1, -2, 0.6, 10),
+      column2: (k) => buildColumn(k, cx + 3.5, -2, 0.5, 8),
+      tank: at(buildTank),
+    },
+    [cx],
+  );
   return (
     <group>
+      {/* structure, pipe rack, pumps, reboilers, process piping, reactor, condenser, columns, storage */}
+      <StationView m={st} view={view} />
       <Clickable sel={{ kind: 'machine', id: 'fbr-distillation', label: 'Hydrochlorination & distillation train' }}>
-        {/* structure, pipe rack, pumps, reboilers, process piping */}
-        <Baked parts={plant} />
+        <Pick m={st} tag="plant" />
         <Comp id="reactor" machine="fbr-distillation" label="Fluidised-bed reactor">
-          <Baked parts={reactor} />
+          <Pick m={st} tag="reactor" />
         </Comp>
         <Comp id="condenser" machine="fbr-distillation" label="Condenser">
-          <Baked parts={cond} />
+          <Pick m={st} tag="cond" />
         </Comp>
-        <Column x={cx + 1} z={-2} r={0.6} h={10} label="Distillation column 1 (heavy ends)" id="column" />
-        <Column x={cx + 3.5} z={-2} r={0.5} h={8} label="Distillation column 2 (light ends)" id="column" />
+        <Comp id="column" machine="fbr-distillation" label="Distillation column 1 (heavy ends)">
+          <Pick m={st} tag="column1" />
+        </Comp>
+        <Comp id="column" machine="fbr-distillation" label="Distillation column 2 (light ends)">
+          <Pick m={st} tag="column2" />
+        </Comp>
         <Comp id="storage" machine="fbr-distillation" label="Pure TCS storage">
-          <Baked parts={tank} />
+          <Pick m={st} tag="tank" />
         </Comp>
       </Clickable>
-      <instancedMesh ref={bubbles} args={[GEO.sphereLow, new THREE.MeshStandardMaterial({ color: '#e6efd8', transparent: true, opacity: 0.6 }), 80]} />
-      <instancedMesh ref={imp} args={[GEO.sphereLow, new THREE.MeshBasicMaterial({ color: '#ffffff' }), 40]} />
+      <instancedMesh ref={bubbles} args={[GEO.sphereLow, bubbleMat, 80]} />
+      <instancedMesh ref={imp} args={[GEO.sphereLow, impMat, 40]} />
       <FlowLine points={[[cx + 5.2, 4.6, -1.5], [cx + 6.5, 2.6, 0]]} color="#cfe8b8" />
       <SensorIndicator id="thermocouple" channel="column" machine="fbr-distillation" position={[cx + 1.65, 9.6, -2]} size={0.16} />
       <SensorIndicator id="thermocouple" channel="reactor" machine="fbr-distillation" position={[cx - 3.2, 3.5, -1]} size={0.16} />
@@ -1837,7 +2051,18 @@ function buildSiemensPlant(k: Kit, rods: [number, number][]) {
   // electrode cooling manifolds and connections
   for (const [m, z] of [[KM.paintBlue, -0.35], [KM.paintRed, 0.35]] as const) {
     k.cyl(m, 0.035, 1.5, [0, 0.24, z], [0, 0, HP], 12);
-    k.pipe(m, [[-0.75, 0.24, z], [-1.3, 0.24, z], [-1.3, 0.12, z], [-2.3, 0.12, z]], 0.035, 0.08);
+    run(k, m, [[-0.75, 0.24, z], [-1.3, 0.24, z], [-1.3, 0.12, z], [-2.3, 0.12, z], [-2.3, 0.0, z]], 0.035, 0.08);
+    k.cyl(KM.steel, 0.07, 0.03, [-2.3, 0.015, z], [0, 0, 0], 14);
+  }
+  // bell-jar jacket water: rigid risers from the floor trench to the coupling halves under the jar's
+  for (const [a, m] of [[2.5, KM.paintBlue], [-0.9, KM.paintRed]] as const) {
+    const x = Math.cos(a) * 1.86;
+    const z = Math.sin(a) * 1.86;
+    k.cyl(ss, 0.04, 1.22, [x, 0.66, z], [0, 0, 0], 12);
+    k.cyl(KM.anodized, 0.05, 0.06, [x, 1.29, z], [0, 0, 0], 14);
+    k.cyl(m, 0.045, 0.05, [x, 0.4, z], [0, 0, 0], 12, { cast: false });
+    k.cyl(KM.steel, 0.07, 0.03, [x, 0.065, z], [0, 0, 0], 14);
+    valve(k, [x, 0.75, z], 'y', 0.035);
   }
   for (const [x, z] of rods) {
     const zm = Math.sign(z) * 0.35;
@@ -1879,14 +2104,14 @@ function buildSiemensPlant(k: Kit, rods: [number, number][]) {
     windowPane(k, W - 0.1, 1.06, [0, 1.25, D / 2 - 0.01]);
     gasStick(k, 0.9, [0, 1.0, -0.05]);
     gasStick(k, 0.9, [0, 1.42, -0.05]);
-    for (const y of [1.0, 1.42]) k.pipe(ss, [[0.45, y, -0.05], [0.52, y, -0.05], [0.52, 0.2, -0.05]], 0.012, 0.05);
+    for (const y of [1.0, 1.42]) run(k, ss, [[0.45, y, -0.05], [0.52, y, -0.05], [0.52, 0.2, -0.05]], 0.012, 0.05);
     plate(k, 'gas', 'SiHCl₃', '', 0.22, 0.045, [-0.25, 0.6, D / 2 + 0.002], [0, 0, 0], '#6b5a2e');
     plate(k, 'gas', 'H₂', '', 0.18, 0.045, [0.25, 0.6, D / 2 + 0.002], [0, 0, 0], '#8a3a32');
     k.cyl(ss, 0.1, 0.4, [0.35, H + 0.25, -0.1], [0, 0, 0], 16);
     k.ao(W, D);
   });
   // off-gas line from the base-plate exhaust nozzle
-  k.pipe(ss, [[-1.0, 0.8, 0], [-1.0, 0.32, 0], [-2.6, 0.32, 0], [-2.6, 2.6, 0], [-2.6, 2.6, -3.2]], 0.09, 0.2);
+  run(k, ss, [[-1.0, 0.8, 0], [-1.0, 0.32, 0], [-2.6, 0.32, 0], [-2.6, 2.6, 0], [-2.6, 2.6, -3.2]], 0.09, 0.2);
   valve(k, [-2.6, 1.5, 0], 'y', 0.07);
   k.box(KM.paintGrey, [0.1, 2.5, 0.1], [-2.6, 1.25, -2.4]);
   plate(k, 'gas', 'OFF-GAS', '', 0.3, 0.06, [-2.6, 2.2, 0.095], [0, 0, 0], '#555c62');
@@ -1897,29 +2122,56 @@ function buildSiemensPlant(k: Kit, rods: [number, number][]) {
     k.rbox(KM.anodized, [0.24, 0.12, 0.12], 0.015, [-0.12, 2.6, 0]);
     k.cyl(KM.glassSmoke, 0.035, 0.03, [-0.25, 2.6, 0], [0, 0, HP], 16);
   });
+  // gas cabinet extras: exhaust damper, status LEDs, EMO, model plate
+  k.at([2.9, 0, -0.55], 0, () => {
+    k.cyl(KM.steel, 0.105, 0.05, [0.35, 2.3, -0.1], [0, 0, 0], 16);
+    ledStrip(k, 0.4, [-0.3, 1.84, 0.302], KM.ledGreen);
+    estop(k, [0.42, 1.84, 0.29]);
+    plate(k, 'model', 'GC-2', 'TCS / H₂ GAS CABINET', 0.34, 0.085, [-0.3, 0.92, 0.302]);
+  });
+  // pyrometer: purge-air hose and signal cable to a junction box on its stand
+  k.at([2.15, 0, 0.27], 0, () => {
+    k.rbox(KM.paintGrey, [0.16, 0.2, 0.09], 0.012, [0, 1.35, 0.06]);
+    sagHose(k, [0.0, 2.55, 0.05], [0.0, 1.45, 0.08], 0.008, -0.08, KM.paintGraphite, 6);
+    sagHose(k, [0.02, 2.6, -0.06], [0.03, 1.5, -0.03], 0.01, -0.05, KM.paintBlue, 6);
+  });
+  // floor marking: keep-clear zone around the reactor frame
+  for (const z of [-2.15, 2.15]) k.box(KM.paintYellow, [4.3, 0.003, 0.07], [0, 0.0015, z], [0, 0, 0], { cast: false });
+  for (const x of [-2.15, 2.15]) k.box(KM.paintYellow, [0.07, 0.003, 4.3], [x, 0.0015, 0], [0, 0, 0], { cast: false });
   k.ao(3.8, 3.8, [0, 0, 0], 1.2);
 }
 
-/** Water-cooled base plate, swing-bolt clamps, electrode feedthroughs (top chucks, copper stems below). */
+/** Water-cooled base plate, swing-bolt hinges, electrode feedthroughs (top chucks, copper stems below). */
 function buildBasePlate(k: Kit, rods: [number, number][]) {
-  k.lathe(ss, crisp([[0.001, 0.8], [1.65, 0.8], [1.65, 1.1], [0.001, 1.1]]), [0, 0, 0], [0, 0, 0], 64);
-  k.cyl(ss, 1.44, 0.004, [0, 1.102, 0], [0, 0, 0], 64, { cast: false });
+  crispLathe(k, ss, [[0.001, 0.8], [1.62, 0.8], [1.65, 0.83], [1.65, 1.075], [1.625, 1.1], [0.001, 1.1]], [0, 0, 0], [0, 0, 0], 64);
+  // mirror-polished (silver-plated) deposition face inside the jar seal
+  k.cyl(KM.chrome, 1.44, 0.004, [0, 1.102, 0], [0, 0, 0], 64, { cast: false });
+  k.torus(KM.rubber, 1.475, 0.008, [0, 1.104, 0], [0, 0, 0], 64, { cast: false });
+  // swing-bolt hinge lugs on the plate rim (the bolts belong to the jar flange)
   for (let i = 0; i < 24; i++)
-    radial(k, 1.6, ((i + 0.5) / 24) * TAU, 1.1, () => {
-      k.cyl(KM.stainlessDark, 0.016, 0.16, [0, 0.08, 0], [0, 0, 0], 6, { cast: false });
-      k.cyl(KM.stainlessDark, 0.03, 0.03, [0, 0.15, 0], [0, 0, 0], 6, { cast: false });
+    radial(k, 1.65, ((i + 0.5) / 24) * TAU, 0.93, () => {
+      for (const s of [-1, 1]) k.box(KM.stainlessDark, [0.01, 0.09, 0.06], [s * 0.022, 0, 0.03], [0, 0, 0], { cast: false });
+      k.cyl(KM.stainlessDark, 0.008, 0.06, [0, -0.012, 0.036], [0, 0, HP], 6, { cast: false });
     });
   for (const [x, z] of rods) {
-    k.cyl(KM.ptfe, 0.1, 0.025, [x, 1.1125, z], [0, 0, 0], 20);
-    k.lathe(M.graphite, [[0.08, 1.1], [0.05, 1.22], [0.001, 1.225]], [x, 0, z], [0, 0, 0], 16);
-    k.cyl(KM.copper, 0.06, 0.5, [x, 0.55, z], [0, 0, 0], 16);
-    k.cyl(KM.ptfe, 0.085, 0.12, [x, 0.72, z], [0, 0, 0], 16);
-    k.cyl(KM.copper, 0.075, 0.06, [x, 0.34, z], [0, 0, 0], 16);
+    k.cyl(KM.ptfe, 0.1, 0.025, [x, 1.1125, z], [0, 0, 0], 16);
+    k.lathe(M.graphite, [[0.08, 1.1], [0.05, 1.22], [0.001, 1.225]], [x, 0, z], [0, 0, 0], 12);
+    k.cyl(KM.copper, 0.06, 0.5, [x, 0.55, z], [0, 0, 0], 12);
+    k.cyl(KM.ptfe, 0.085, 0.12, [x, 0.72, z], [0, 0, 0], 14);
+    k.cyl(KM.copper, 0.075, 0.06, [x, 0.34, z], [0, 0, 0], 12);
     k.box(KM.copper, [0.2, 0.03, 0.06], [x + Math.sign(x) * 0.08, 0.43, z]);
   }
-  // exhaust nozzle and auxiliary feed nozzles
-  k.cyl(ss, 0.12, 0.05, [-1.0, 1.12, 0], [0, 0, 0], 24);
-  k.cyl(KM.seam, 0.08, 0.005, [-1.0, 1.146, 0], [0, 0, 0], 20, { cast: false });
+  // exhaust nozzle
+  k.cyl(ss, 0.12, 0.05, [-1.0, 1.12, 0], [0, 0, 0], 20);
+  k.cyl(KM.seam, 0.08, 0.005, [-1.0, 1.146, 0], [0, 0, 0], 16, { cast: false });
+  // plate cooling water in/out on the rim, hoses to the manifolds
+  for (const [a, z, m] of [[Math.PI - 0.22, -0.35, KM.paintBlue], [Math.PI + 0.22, 0.35, KM.paintRed]] as const) {
+    radial(k, 1.65, a, 0.95, () => {
+      nozzle(k, 0.03, 0.08);
+      k.cyl(m, 0.036, 0.03, [0, 0, 0.05], [HP, 0, 0], 10, { cast: false });
+    });
+    sagHose(k, [Math.cos(a) * 1.76, 0.95, Math.sin(a) * 1.76], [-1.3, 0.28, z], 0.022, 0.12, KM.rubber, 6);
+  }
 }
 
 /** Central gas nozzle and the TCS/H₂ feed line with flange, valve and MFC. */
@@ -1927,61 +2179,115 @@ function buildGasInlet(k: Kit) {
   k.cyl(ss, 0.05, 0.3, [0, 1.2, 0], [0, 0, 0], 16);
   k.cyl(KM.ptfe, 0.035, 0.05, [0, 1.37, 0], [0, 0, 0], 12);
   for (const z of [-0.35, 0.35]) k.cyl(ss, 0.03, 0.1, [0, 1.15, z], [0, 0, 0], 12);
-  k.pipe(ss, [[0, 0.8, 0], [0, 0.3, 0], [2.5, 0.3, 0], [2.5, 0.3, -0.3]], 0.07, 0.15);
+  run(k, ss, [[0, 0.8, 0], [0, 0.3, 0], [2.5, 0.3, 0], [2.5, 0.3, -0.3]], 0.07, 0.15);
   k.cyl(ss, 0.12, 0.04, [1.6, 0.3, 0], [0, 0, HP], 16);
   valve(k, [1.9, 0.3, 0], 'x', 0.06);
   k.rbox(KM.anodized, [0.14, 0.16, 0.09], 0.012, [2.25, 0.42, 0]);
   k.box(KM.screen, [0.08, 0.04, 0.002], [2.25, 0.45, 0.046], [0, 0, 0], { cast: false });
 }
 
-/** Bell jar (moves with the jar group): jacketed double wall, polished liner, flange, sight glasses, lifting bail. */
+/** Jacket water line on the bell jar: nozzle at angle a / height y, rigid drop to a quick coupling above the plate. */
+function jacketLine(k: Kit, a: number, y: number, tag: THREE.Material, sh: PartOpts) {
+  const c = Math.cos(a);
+  const sn = Math.sin(a);
+  const at = (r: number, yy: number): V3 => [c * r, yy, sn * r];
+  radial(k, 1.52, a, y, () => nozzle(k, 0.05, 0.16, sh));
+  run(k, ss, [at(1.72, y), at(1.86, y), at(1.86, 1.42)], 0.04, 0.1, sh);
+  // clamp bracket to the jacket on long drops
+  if (y > 2.5) radial(k, 1.52, a, (y + 1.4) / 2, () => k.box(ss, [0.05, 0.06, 0.34], [0, 0, 0.17], [0, 0, 0], sh));
+  k.cyl(KM.anodized, 0.056, 0.1, at(1.86, 1.37), [0, 0, 0], 14, sh);
+  k.cyl(tag, 0.045, 0.06, at(1.86, 1.48), [0, 0, 0], 12, { ...sh, cast: false });
+}
+
+/** Bell jar (moves with the jar group): jacketed double wall, polished liner, swing-bolted flange, sight glasses, jacket water, lifting gear. */
 function buildBellJar(k: Kit) {
   const sh = { shell: true };
-  ring(k, ss, 1.46, 1.72, 1.1, 1.22, 64, sh);
-  for (let i = 0; i < 24; i++) radial(k, 1.66, (i / 24) * TAU, 1.22, () => k.box(KM.stainlessDark, [0.06, 0.05, 0.08], [0, 0.025, 0], [0, 0, 0], { ...sh, cast: false }));
-  k.cyl(KM.chrome, 1.46, 2.8, [0, 2.6, 0], [0, 0, 0], 64, { ...sh, open: true });
-  k.cyl(ss, 1.52, 2.78, [0, 2.61, 0], [0, 0, 0], 64, { ...sh, open: true });
-  const dome = (r: number): P2[] => Array.from({ length: 13 }, (_, i) => [Math.max(1e-3, r * Math.cos((i / 12) * HP)), 4.0 + r * Math.sin((i / 12) * HP)] as P2);
-  k.lathe(ss, dome(1.52), [0, 0, 0], [0, 0, 0], 64, sh);
-  k.lathe(KM.chrome, dome(1.46).reverse(), [0, 0, 0], [0, 0, 0], 48, sh);
-  for (const y of [1.6, 2.3, 3.0, 3.7]) ring(k, KM.stainlessDark, 1.52, 1.565, y - 0.03, y + 0.03, 64, sh);
-  ring(k, KM.stainlessDark, 1.52, 1.56, 3.97, 4.03, 64, sh);
-  // jacket water in / out
-  radial(k, 1.52, 2.5, 1.45, () => nozzle(k, 0.05, 0.16, sh));
-  radial(k, 1.52, -0.9, 3.85, () => nozzle(k, 0.05, 0.16, sh));
-  radial(k, 1.62, 2.5, 1.45, () => k.cyl(KM.paintBlue, 0.056, 0.06, [0, 0, 0.12], [HP, 0, 0], 12, sh));
-  radial(k, 1.62, -0.9, 3.85, () => k.cyl(KM.paintRed, 0.056, 0.06, [0, 0, 0.12], [HP, 0, 0], 12, sh));
-  // sight glasses (pyrometer port on +X)
-  radial(k, 1.5, 0, 2.6, () => viewport(k, 0.12, 0.12, sh));
-  radial(k, 1.5, 1.05, 2.0, () => viewport(k, 0.09, 0.1, sh));
-  radial(k, 1.5, 2.2, 3.15, () => viewport(k, 0.09, 0.1, sh));
-  // lifting lugs, top boss, bail
-  for (const a of [0.4, 0.4 + (2 * Math.PI) / 3, 0.4 + (4 * Math.PI) / 3]) radial(k, 1.1, a, 5.05, () => k.box(ss, [0.04, 0.22, 0.2], [0, 0.1, 0], [0, 0, 0], sh));
-  k.cyl(ss, 0.16, 0.12, [0, 5.56, 0], [0, 0, 0], 24, sh);
-  k.cyl(KM.steel, 0.05, 2.4, [0, 6.6, 0], [0, 0, 0], 16);
-  k.add(KM.steel, new THREE.TorusGeometry(0.14, 0.025, 8, 20), [0, 7.92, 0], [0, 0, 0]);
-  shellLabel(k, 'model', 'PS-08', 'POLY CVD REACTOR · 8 RODS', 0.56, 0.14, [Math.cos(0.32) * 1.585, 3.35, Math.sin(0.32) * 1.585], [0, HP - 0.32, 0]);
-  shellLabel(k, 'warn', 'HOT SURFACE', '', 0.16, 0.16, [Math.cos(0.75) * 1.575, 3.35, Math.sin(0.75) * 1.575], [0, HP - 0.75, 0]);
+  const R = 1.52;
+  // bottom flange and tapered weld neck
+  ring(k, jarSteel, 1.46, 1.72, 1.1, 1.22, 64, sh);
+  crispLathe(k, jarSteel, [[1.72, 1.22], [1.6, 1.22], [R + 0.003, 1.34]], [0, 0, 0], [0, 0, 0], 64, sh);
+  // swing bolts: shank from the plate hinge through the flange slot, washer and hex nut on top
+  for (let i = 0; i < 24; i++)
+    radial(k, 1.685, ((i + 0.5) / 24) * TAU, 0, () => {
+      k.cyl(KM.stainlessDark, 0.013, 0.36, [0, 1.1, 0], [0, 0, 0], 6, { ...sh, cast: false });
+      k.cyl(ss, 0.032, 0.008, [0, 1.226, 0], [0, 0, 0], 10, { ...sh, cast: false });
+      k.cyl(ss, 0.025, 0.03, [0, 1.245, 0], [0, 0, 0], 6, { ...sh, cast: false });
+    });
+  // polished liner (seen in cut-away) inside the outer jacket skin
+  k.cyl(jarSteel, 1.46, 2.8, [0, 2.6, 0], [0, 0, 0], 64, { ...sh, open: true });
+  k.cyl(jarSteel, R, 2.66, [0, 2.67, 0], [0, 0, 0], 64, { ...sh, open: true });
+  const dome = (r: number): P2[] => Array.from({ length: 11 }, (_, i) => [Math.max(1e-3, r * Math.cos((i / 10) * HP)), 4.0 + r * Math.sin((i / 10) * HP)] as P2);
+  k.lathe(jarSteel, dome(R), [0, 0, 0], [0, 0, 0], 64, sh);
+  k.lathe(jarSteel, dome(1.46).reverse(), [0, 0, 0], [0, 0, 0], 40, sh);
+  // jacket girth stiffeners, course and knuckle weld seams, long seams
+  for (const y of [1.62, 3.72]) ring(k, jarSteel, R, R + 0.028, y - 0.035, y + 0.035, 64, sh);
+  for (const y of [2.2, 2.95, 4.0]) k.cyl(KM.stainlessDark, R + 0.002, 0.012, [0, y, 0], [0, 0, 0], 64, { ...sh, open: true, cast: false });
+  for (const a of [0.9, 0.9 + (2 * Math.PI) / 3, 0.9 + (4 * Math.PI) / 3]) radial(k, R + 0.0015, a, 2.67, () => k.box(KM.stainlessDark, [0.01, 2.0, 0.003], [0, 0, 0], [0, 0, 0], { ...sh, cast: false }));
+  // jacket water in (low, blue) and out (high, red)
+  jacketLine(k, 2.5, 1.45, KM.paintBlue, sh);
+  jacketLine(k, -0.9, 3.85, KM.paintRed, sh);
+  // sight glasses: pyrometer port on +X, two viewing ports with shutters swung open
+  radial(k, R - 0.02, 0, 2.6, () => viewport(k, 0.12, 0.14, sh));
+  for (const [a, y] of [[1.05, 2.0], [2.2, 3.15]] as const)
+    radial(k, R - 0.02, a, y, () => {
+      viewport(k, 0.09, 0.12, sh);
+      k.cyl(KM.stainlessDark, 0.008, 0.2, [0, 0.12, 0.15], [0, 0, HP], 6, { ...sh, cast: false });
+      k.box(ss, [0.22, 0.2, 0.012], [0, 0.182, 0.228], [0.9, 0, 0], sh);
+    });
+  // dome: top nozzle with blind flange, pressure gauge, lifting lugs
+  k.cyl(jarSteel, 0.16, 0.14, [0, 5.55, 0], [0, 0, 0], 20, sh);
+  k.cyl(jarSteel, 0.24, 0.04, [0, 5.64, 0], [0, 0, 0], 24, sh);
+  k.cyl(jarSteel, 0.24, 0.04, [0, 5.685, 0], [0, 0, 0], 24, sh);
+  boltCircle(k, 0.205, 8, 5.708, 0.012, KM.stainlessDark, sh);
+  k.cyl(ss, 0.016, 0.3, [0.5, 5.55, 0], [0, 0, 0], 8, sh);
+  k.cyl(ss, 0.065, 0.035, [0.5, 5.74, 0.0], [HP, 0, 0], 16, sh);
+  k.cyl(KM.plasticWhite, 0.055, 0.004, [0.5, 5.74, 0.019], [HP, 0, 0], 16, { ...sh, cast: false });
+  const lugs = [0.4, 0.4 + (2 * Math.PI) / 3, 0.4 + (4 * Math.PI) / 3];
+  for (const a of lugs)
+    radial(k, 1.1, a, 5.05, () => {
+      k.box(jarSteel, [0.04, 0.22, 0.2], [0, 0.1, 0], [0, 0, 0], sh);
+      k.add(KM.steel, new THREE.TorusGeometry(0.045, 0.011, 5, 10), [0, 0.25, 0], [0, HP, 0]);
+    });
+  // lifting gear (not part of the shell): slings to the master link, hook block, wire rope
+  for (const a of lugs) rod(k, KM.steel, [Math.cos(a) * 1.1, 5.33, Math.sin(a) * 1.1], [0, 6.74, 0], 0.012, 6);
+  k.add(KM.steel, new THREE.TorusGeometry(0.08, 0.018, 6, 14), [0, 6.82, 0], [0, 0, 0]);
+  k.add(KM.steel, new THREE.TorusGeometry(0.075, 0.022, 6, 12, Math.PI * 1.4), [0, 7.0, 0], [0, 0, -0.9]);
+  k.rbox(KM.paintYellow, [0.24, 0.32, 0.12], 0.02, [0, 7.3, 0]);
+  k.cyl(KM.steel, 0.07, 0.06, [0, 7.36, 0.07], [HP, 0, 0], 16);
+  for (const x of [-0.05, 0.05]) k.cyl(KM.steel, 0.011, 0.5, [x, 7.7, 0], [0, 0, 0], 6);
+  shellLabel(k, 'model', 'PS-08', 'POLY CVD REACTOR · 8 RODS', 0.56, 0.14, [Math.cos(0.32) * 1.526, 3.35, Math.sin(0.32) * 1.526], [0, HP - 0.32, 0]);
+  shellLabel(k, 'warn', 'HOT SURFACE', '', 0.16, 0.16, [Math.cos(0.75) * 1.526, 3.35, Math.sin(0.75) * 1.526], [0, HP - 0.75, 0]);
+  shellLabel(k, 'info', 'JACKET CW', 'MAX 6 bar · 25→45 °C', 0.3, 0.075, [Math.cos(2.5) * 1.526, 1.8, Math.sin(2.5) * 1.526], [0, HP - 2.5, 0]);
 }
 
 /** Polysilicon chunk tote on a pallet (outside the reactor selection, as before). */
 function buildTote(k: Kit) {
   k.at([3.1, 0, 1.85], 0, () => {
-    k.box(KM.plastic, [1.5, 0.04, 1.0], [0, 0.1, 0]);
-    for (const x of [-0.6, 0, 0.6]) k.box(KM.plastic, [0.16, 0.08, 1.0], [x, 0.04, 0]);
-    k.box(ss, [1.5, 0.04, 1.0], [0, 0.14, 0]);
+    // plastic pallet: deck, nine blocks, three runners
+    k.box(KM.plastic, [1.5, 0.03, 1.0], [0, 0.115, 0]);
+    for (const x of [-0.66, 0, 0.66]) for (const z of [-0.43, 0, 0.43]) k.box(KM.plastic, [0.14, 0.08, 0.14], [x, 0.06, z]);
+    for (const z of [-0.43, 0, 0.43]) k.box(KM.plastic, [1.5, 0.02, 0.14], [0, 0.01, z]);
+    // stainless bin: floor, walls, corner posts, rolled rim, end handles
+    k.box(ss, [1.5, 0.03, 1.0], [0, 0.145, 0]);
     for (const s of [-1, 1]) {
-      k.box(ss, [1.5, 0.66, 0.03], [0, 0.47, s * 0.5]);
-      k.box(ss, [0.03, 0.66, 1.0], [s * 0.75, 0.47, 0]);
-      k.box(KM.stainlessDark, [1.54, 0.03, 0.05], [0, 0.8, s * 0.5]);
-      k.box(KM.stainlessDark, [0.05, 0.03, 1.04], [s * 0.75, 0.8, 0]);
+      k.box(ss, [1.46, 0.64, 0.02], [0, 0.48, s * 0.49]);
+      k.box(ss, [0.02, 0.64, 0.96], [s * 0.74, 0.48, 0]);
+      rod(k, ss, [-0.74, 0.805, s * 0.49], [0.74, 0.805, s * 0.49], 0.016, 8);
+      rod(k, ss, [s * 0.74, 0.805, -0.49], [s * 0.74, 0.805, 0.49], 0.016, 8);
+      for (const t of [-1, 1]) k.box(KM.stainlessDark, [0.05, 0.68, 0.05], [s * 0.735, 0.48, t * 0.485]);
+      k.box(KM.stainlessDark, [0.012, 0.03, 0.9], [s * 0.752, 0.32, 0], [0, 0, 0], { cast: false });
+      for (const z of [-0.18, 0.18]) k.box(ss, [0.05, 0.03, 0.03], [s * 0.77, 0.66, z]);
+      rod(k, ss, [s * 0.795, 0.66, -0.2], [s * 0.795, 0.66, 0.2], 0.014, 8);
     }
-    k.box(KM.plasticWhite, [1.43, 0.02, 0.93], [0, 0.64, 0]);
+    // PE liner folded over the rim
+    k.box(KM.plasticWhite, [1.42, 0.02, 0.92], [0, 0.64, 0]);
     for (const s of [-1, 1]) {
-      k.box(KM.plasticWhite, [1.43, 0.15, 0.01], [0, 0.72, s * 0.48]);
-      k.box(KM.plasticWhite, [0.01, 0.15, 0.93], [s * 0.73, 0.72, 0]);
+      k.box(KM.plasticWhite, [1.42, 0.17, 0.008], [0, 0.73, s * 0.475]);
+      k.box(KM.plasticWhite, [0.008, 0.17, 0.92], [s * 0.725, 0.73, 0]);
+      k.box(KM.plasticWhite, [1.4, 0.09, 0.006], [0, 0.78, s * 0.512], [0, 0, 0], { cast: false });
     }
-    plate(k, 'tag', 'POLY-Si · 11N', 'BIN 03 · LOT P-0912', 0.42, 0.105, [0, 0.45, 0.517]);
+    plate(k, 'tag', 'POLY-Si · 11N', 'BIN 03 · LOT P-0912', 0.42, 0.105, [0, 0.45, 0.502]);
+    plate(k, 'info', 'CLEAN · DO NOT TOUCH', 'GLOVES REQUIRED', 0.3, 0.075, [0.751, 0.45, 0], [0, HP, 0]);
     k.ao(1.6, 1.1);
   });
 }
@@ -2021,6 +2327,7 @@ function Siemens() {
     });
     if (jar.current) jar.current.position.y = 3.6 * smooth(harvest * 1.6);
     if (bin.current) {
+      bin.current.visible = !active || harvest > 0.55;
       for (let i = 0; i < 60; i++) {
         o.position.set(cx + 2.6 + (i % 6) * 0.2, 0.75 + Math.floor(i / 12) * 0.12, 1.6 + Math.floor((i % 12) / 6) * 0.25 + ((i * 7) % 3) * 0.05);
         o.rotation.set(i, i * 2.3, i * 0.7);
@@ -2033,21 +2340,22 @@ function Siemens() {
     if (active) track('focus', cx, 2.2, 0);
   });
   const at = (fn: (k: Kit) => void) => (k: Kit) => k.at([cx, 0, 0], 0, () => fn(k));
-  const plant = useModel(at((k) => buildSiemensPlant(k, ROD_POS)), [cx]);
-  const plate = useModel(at((k) => buildBasePlate(k, ROD_POS)), [cx]);
-  const gas = useModel(at(buildGasInlet), [cx]);
-  const jarParts = useModel(at(buildBellJar), [cx]);
-  const tote = useModel(at(buildTote), [cx]);
+  const st = useStation(
+    { plant: at((k) => buildSiemensPlant(k, ROD_POS)), electrodes: at((k) => buildBasePlate(k, ROD_POS)), gas: at(buildGasInlet), _tote: at(buildTote) },
+    [cx],
+  );
+  const jarParts = useStation({ jar: at(buildBellJar) }, [cx]);
   return (
     <group>
+      {/* support frame, under-plate utilities, power & gas cabinets, off-gas, base plate, gas inlet, tote */}
+      <StationView m={st} />
       <Clickable sel={{ kind: 'machine', id: 'siemens-reactor', label: 'Siemens CVD reactor' }}>
-        {/* support frame, under-plate utilities, power & gas cabinets, off-gas */}
-        <Baked parts={plant} />
+        <Pick m={st} tag="plant" />
         <Comp id="electrodes" machine="siemens-reactor" label="Base-plate electrodes">
-          <Baked parts={plate} />
+          <Pick m={st} tag="electrodes" />
         </Comp>
         <Comp id="gas-inlet" machine="siemens-reactor" label="Gas inlet nozzles">
-          <Baked parts={gas} />
+          <Pick m={st} tag="gas" />
         </Comp>
         <Comp id="rods" machine="siemens-reactor" label="Silicon rods (U-shaped pairs)">
           {ROD_POS.map(([x, z], i) => (
@@ -2061,11 +2369,10 @@ function Siemens() {
         </Comp>
         <group ref={jar}>
           <Comp id="bell-jar" machine="siemens-reactor" label="Bell jar">
-            <Baked parts={jarParts} view={view} />
+            <StationView m={jarParts} view={view} pickable />
           </Comp>
         </group>
       </Clickable>
-      <Baked parts={tote} />
       <instancedMesh ref={bin} args={[rockGeo, polyMat, 60]} castShadow />
       <SensorIndicator id="pyrometer" channel="rodT" machine="siemens-reactor" position={[cx + 1.7, 2.6, 0.25]} size={0.14} />
       <SensorIndicator id="mfc" channel="tcs" machine="siemens-reactor" position={[cx + 2.3, 0.45, 0.2]} size={0.12} />

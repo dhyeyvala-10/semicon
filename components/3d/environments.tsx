@@ -17,6 +17,7 @@ import { gradeState } from '@/lib/runtime';
 import { KM } from './kit/finish';
 import { iBeam, cableTray, grille, type Kit } from './kit/build';
 import { Baked, useKit } from './kit/Baked';
+import { SHADOW_LAYER } from './kit/shadow';
 
 type Env = SceneConfig['environment'];
 
@@ -36,6 +37,18 @@ export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0], fogScale 
   const quality = useUI((s) => s.quality);
   const scene = useThree((s) => s.scene);
   const hemi = useRef<THREE.HemisphereLight>(null);
+  const key = useRef<THREE.DirectionalLight>(null);
+  // the key light aims at a real scene object, so its shadow camera follows `center`
+  const keyTarget = useMemo(() => new THREE.Object3D(), []);
+  useEffect(() => {
+    keyTarget.position.set(center[0], center[1], center[2]);
+    keyTarget.updateMatrixWorld();
+    const l = key.current;
+    if (!l) return;
+    l.target = keyTarget;
+    // shadow-only casters (kit models) live on their own layer
+    l.shadow.camera.layers.enable(SHADOW_LAYER);
+  }, [keyTarget, center[0], center[1], center[2]]); // eslint-disable-line react-hooks/exhaustive-deps
   const base = useMemo(() => ({ bg: new THREE.Color(e.bg), sky: new THREE.Color(e.hemi[0]) }), [e]);
   useEffect(() => {
     scene.background = new THREE.Color(e.bg);
@@ -56,9 +69,10 @@ export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0], fogScale 
     <>
       <hemisphereLight ref={hemi} args={[e.hemi[0], e.hemi[1], e.hemi[2]]} />
       <ambientLight intensity={e.amb} />
+      <primitive object={keyTarget} />
       <directionalLight
+        ref={key}
         position={[center[0] + 6, center[1] + 14, center[2] + 8]}
-        target-position={center}
         color={e.key[0]}
         intensity={e.key[1]}
         castShadow={quality === 'high'}
