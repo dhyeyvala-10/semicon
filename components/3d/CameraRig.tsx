@@ -45,17 +45,23 @@ const toPose = (p: CameraPreset): Pose => {
   return { t, r, az: Math.atan2(off.x, off.z), el: Math.asin(THREE.MathUtils.clamp(off.y / r, -1, 1)), fov: p.fov ?? 45 };
 };
 
+interface StoryKey {
+  u: number;
+  pose: Pose;
+  mode: CameraMode;
+}
+
 /** One camera key per phase, at the middle of the phase, from the phase's camera cue. */
-function storyKeys(stage: Stage): { u: number; pose: Pose }[] {
+function storyKeys(stage: Stage): StoryKey[] {
   const D = stage.phases.reduce((a, p) => a + p.duration, 0) || 1;
   const first = stage.phases.find((p) => p.camera && presetFor(stage.scene, stage.variant, p.camera))?.camera;
   let mode = first ?? (modesFor(stage.scene, stage.variant)[0] as CameraMode) ?? 'factory';
   let acc = 0;
-  const keys: { u: number; pose: Pose }[] = [];
+  const keys: StoryKey[] = [];
   for (const p of stage.phases) {
     if (p.camera && presetFor(stage.scene, stage.variant, p.camera)) mode = p.camera;
     const preset = presetFor(stage.scene, stage.variant, mode) ?? presetFor(stage.scene, stage.variant, 'factory') ?? Object.values(SCENES[stage.scene].presets)[0];
-    if (preset) keys.push({ u: (acc + p.duration / 2) / D, pose: toPose(preset) });
+    if (preset) keys.push({ u: (acc + p.duration / 2) / D, pose: toPose(preset), mode });
     acc += p.duration;
   }
   return keys;
@@ -85,7 +91,7 @@ export function CameraRig() {
   const lastPhase = useRef(-1);
   const lastStage = useRef('');
   const probeAcc = useRef(0);
-  const storyCam = useRef({ stage: '', keys: [] as { u: number; pose: Pose }[], pos: new THREE.Vector3(), tgt: new THREE.Vector3(), want: new THREE.Vector3(), wantT: new THREE.Vector3(), fov: 45, offset: false });
+  const storyCam = useRef({ stage: '', keys: [] as StoryKey[], pos: new THREE.Vector3(), tgt: new THREE.Vector3(), want: new THREE.Vector3(), wantT: new THREE.Vector3(), fov: 45, offset: false });
 
   useEffect(() => {
     cameraRef.current = camera;
@@ -171,6 +177,11 @@ export function CameraRig() {
         b = keys[i];
       }
       const e = a === b ? 0 : ease((u - a.u) / Math.max(1e-6, b.u - a.u));
+      // the camera mode drives cut-aways and the magnified insets, so follow the nearer key
+      // ('data' dims the canvas for data overlays, which the story does not show)
+      const near = e < 0.5 ? a.mode : b.mode;
+      const m = near === 'data' ? 'factory' : near;
+      if (m !== useUI.getState().cameraMode) useUI.setState({ cameraMode: m });
       const A = a.pose;
       const B = b.pose;
       // spherical blend around the target: sweeps around machines instead of cutting through them

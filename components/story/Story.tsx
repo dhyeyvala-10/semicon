@@ -24,6 +24,11 @@ import { Glyph } from './Glyph';
 
 const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'];
 const HERO_STAGE = 'fab-overview';
+/** Set once the visitor has opened the twin; coming back, the story resumes where they were. */
+let visitedTwin = false;
+useUI.subscribe((s) => {
+  if (s.started) visitedTwin = true;
+});
 
 /** Leave the story and open the full twin at a stage. */
 export function enterExplore(stageId: string) {
@@ -248,7 +253,8 @@ export function Story() {
     ro.observe(el);
 
     // resume where the visitor left the story (e.g. coming back from the twin)
-    const ci = CHAPTERS.findIndex((c) => c.stage.id === engine.stage.id);
+    // (a first visit always opens on the hero: the engine starts on the first stage before the store syncs it)
+    const ci = visitedTwin ? CHAPTERS.findIndex((c) => c.stage.id === engine.stage.id) : -1;
     if (ci >= 0) {
       const sec = secs[ci + 1];
       el.scrollTop = sec.top - el.clientHeight * readLine() + sec.h * engine.player.view.stageT;
