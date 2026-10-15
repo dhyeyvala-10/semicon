@@ -7,7 +7,7 @@
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree, type ThreeEvent } from '@react-three/fiber';
-import { Html, Line } from '@react-three/drei';
+import { Line } from '@react-three/drei';
 import type { SceneProps } from '../SceneSwitcher';
 import { Lighting } from '../environments';
 import { M, STATE_COLOR, XRAY } from '../materials';
@@ -20,13 +20,14 @@ import { Screen, clear, plot, bigNumber, SCR } from '../parts/screens';
 import { buildFabTools, towerPos, atlasLabel, rbGeo, FM } from '../fab/toolModels';
 import { KM, aoMaterial } from '../kit/finish';
 import { Kit, grille } from '../kit/build';
-import { Baked, useKit } from '../kit/Baked';
+import { Baked, useCached, useKit } from '../kit/Baked';
 import { shadowOnly } from '../kit/shadow';
 import { FabInfrastructure } from '../fab/FabInfrastructure';
 import { TOOLS, BAYS, FAB, BAY_X, OHT_LOOP, localToWorld, type ToolInstance } from '@/data/fabLayout';
 import { engine } from '@/simulation/engine';
 import { loopPoint, PORT_HEIGHT, FAB_TIME_COMPRESSION, type Vehicle } from '@/simulation/fab';
 import { useUI } from '@/lib/store';
+import { getQuality } from '@/lib/quality';
 import { track, hoverState, cameraDriver } from '@/lib/runtime';
 import { fmt, rng } from '@/lib/math';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
@@ -222,13 +223,16 @@ const PICK_MAT = new THREE.MeshBasicMaterial();
 function Tools() {
   const view = useUI((s) => s.view);
   const select = useUI((s) => s.select);
-  const fab = useMemo(() => buildFabTools(TOOLS), []);
-  useEffect(
-    () => () => {
-      fab.parts.forEach((p) => p.geometry.dispose());
-      fab.caster?.dispose();
+  // phones: no shadow caster (no shadow maps) and no sub-centimetre detail. Kept across
+  // visits (back to the landing), freed like other cached models.
+  const q = getQuality();
+  const fab = useCached(
+    `fab-tools:${q.lite ? 1 : 0}:${q.shadows ? 1 : 0}`,
+    () => buildFabTools(TOOLS, { lite: q.lite, caster: q.shadows }),
+    (f) => {
+      f.parts.forEach((p) => p.geometry.dispose());
+      f.caster?.dispose();
     },
-    [fab],
   );
   const caster = useMemo(() => (fab.caster ? shadowOnly(fab.caster) : null), [fab]);
   const ao = useMemo(() => aoMaterial(), []);
@@ -876,8 +880,6 @@ export default function FabScene(_props: SceneProps) {
   const airflow = useUI((s) => s.airflow);
   const particles = useUI((s) => s.particles);
   const infra = useUI((s) => s.infrastructure);
-  const info = useUI((s) => s.info);
-  const started = useUI((s) => s.started);
   return (
     <>
       <Lighting env="cleanroom" shadowExtent={46} />
@@ -897,15 +899,6 @@ export default function FabScene(_props: SceneProps) {
       {airflow && <Airflow />}
       {particles && <Particles />}
       {infra && <FabInfrastructure />}
-      {info >= 2 &&
-        started &&
-        BAYS.map((b) => (
-          <Html key={b.id} position={[b.x, 4.5, b.side * 9]} center zIndexRange={[10, 0]} style={{ pointerEvents: 'none' }}>
-            <div className="tlabel" style={{ transform: 'none', borderLeftColor: b.light === 'amber' ? '#ffb24d' : undefined }}>
-              <div className="tlabel-title">{b.name}</div>
-            </div>
-          </Html>
-        ))}
       <IntroCamera />
     </>
   );

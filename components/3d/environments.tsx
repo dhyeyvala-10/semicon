@@ -1,19 +1,18 @@
 'use client';
 /**
  * Lighting rigs and reusable architectural environments.
- * Reflections come from a locally generated environment map (Lightformers) — no HDR
- * download, so the experience works fully offline.
+ * Reflections come from a locally generated environment map (soft area lights around a dark
+ * room) — no HDR download, so the experience works fully offline.
  */
 import * as THREE from 'three';
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import { Environment, Lightformer } from '@react-three/drei';
 import type { SceneConfig } from '@/types';
 import { M } from './materials';
 import { floorTile, ffuPanel, concrete, plainTile } from './textures';
 import { B, C, GEO } from './parts/primitives';
-import { useUI } from '@/lib/store';
 import { gradeState } from '@/lib/runtime';
+import { getQuality } from '@/lib/quality';
 import { KM } from './kit/finish';
 import { iBeam, cableTray, grille, type Kit } from './kit/build';
 import { Baked, useKit } from './kit/Baked';
@@ -32,9 +31,68 @@ const ENV: Record<Env, { bg: string; fog: [number, number] | null; hemi: [string
   exterior: { bg: '#1a211c', fog: [200, 560], hemi: ['#c9d6c3', '#2b2d2a', 0.75], key: ['#fff1dc', 1.7], amb: 0.14 },
 };
 
+/* ------------------------------------------------------------ environment map */
+
+/*
+ * The room the reflections show: four soft area lights ("lightformers": the same shapes,
+ * colours, intensities and placement drei's <Environment>/<Lightformer> produced, each facing
+ * the centre) rendered once into a cube map. It is built once per look (neutral / amber) and
+ * per renderer, then reused. drei's <Environment frames={1}> rebuilt it on every scene mount,
+ * inside a layout effect, recompiling its materials synchronously: a multi-second main-thread
+ * block at each scene change on a slow GPU.
+ */
+interface Former {
+  form: 'rect' | 'ring';
+  intensity: number;
+  color: string;
+  position: [number, number, number];
+  scale: [number, number, number];
+}
+const formers = (amber: boolean): Former[] => [
+  { form: 'rect', intensity: amber ? 2.0 : 2.2, color: amber ? '#ffcf86' : '#f4f8f0', position: [0, 5, 0], scale: [12, 12, 1] },
+  { form: 'rect', intensity: 1.2, color: amber ? '#ffb85c' : '#dfe9f0', position: [-6, 2, -4], scale: [6, 3, 1] },
+  { form: 'rect', intensity: 0.9, color: amber ? '#ffb85c' : '#e8eef2', position: [6, 2, 4], scale: [6, 3, 1] },
+  { form: 'ring', intensity: 0.6, color: '#ffffff', position: [0, 1, 8], scale: [3, 3, 3] },
+];
+const envMaps = new WeakMap<THREE.WebGLRenderer, Map<string, THREE.Texture>>();
+let formerGeo: Record<Former['form'], THREE.BufferGeometry> | null = null;
+
+function environmentMap(gl: THREE.WebGLRenderer, amber: boolean, resolution: number): THREE.Texture {
+  let maps = envMaps.get(gl);
+  if (!maps) envMaps.set(gl, (maps = new Map()));
+  const key = `${amber ? 'amber' : 'neutral'}:${resolution}`;
+  const hit = maps.get(key);
+  if (hit) return hit;
+  formerGeo ??= { rect: new THREE.PlaneGeometry(1, 1), ring: new THREE.RingGeometry(0.25, 0.5, 64) };
+  const room = new THREE.Scene();
+  room.background = new THREE.Color(amber ? '#20160b' : '#14181b');
+  for (const f of formers(amber)) {
+    // never disposed: the program stays compiled for the other look
+    const mat = new THREE.MeshBasicMaterial({ toneMapped: false, side: THREE.DoubleSide });
+    mat.color.set(f.color).multiplyScalar(f.intensity);
+    const m = new THREE.Mesh(formerGeo[f.form], mat);
+    m.position.set(...f.position);
+    m.scale.set(...f.scale);
+    room.add(m);
+    m.lookAt(0, 0, 0);
+  }
+  const target = new THREE.WebGLCubeRenderTarget(resolution);
+  target.texture.type = THREE.HalfFloatType;
+  const cam = new THREE.CubeCamera(0.1, 1000, target);
+  room.add(cam);
+  const autoClear = gl.autoClear;
+  gl.autoClear = true;
+  cam.update(gl, room);
+  gl.autoClear = autoClear;
+  maps.set(key, target.texture);
+  return target.texture;
+}
+
 export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0], fogScale = 1 }: { env: Env; shadowExtent?: number; center?: [number, number, number]; /** multiply fog distances (scenes in cm use 100) */ fogScale?: number }) {
   const e = ENV[env];
-  const quality = useUI((s) => s.quality);
+  // shadow maps and the environment size come from the device tier (fixed per session:
+  // both are part of every shader program, so they never change mid-session)
+  const q = getQuality();
   const scene = useThree((s) => s.scene);
   const hemi = useRef<THREE.HemisphereLight>(null);
   const key = useRef<THREE.DirectionalLight>(null);
@@ -65,6 +123,17 @@ export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0], fogScale 
     if (hemi.current) hemi.current.color.copy(base.sky).lerp(gradeState.glow, 0.14);
   });
   const amber = env === 'litho';
+  // reflections: the cached environment map of this look (see environmentMap)
+  const gl = useThree((s) => s.gl);
+  useLayoutEffect(() => {
+    const before = { map: scene.environment, intensity: scene.environmentIntensity };
+    scene.environment = environmentMap(gl, amber, q.envResolution);
+    scene.environmentIntensity = env === 'void' ? 0.62 : 0.55;
+    return () => {
+      scene.environment = before.map;
+      scene.environmentIntensity = before.intensity;
+    };
+  }, [gl, scene, amber, env, q.envResolution]);
   return (
     <>
       <hemisphereLight ref={hemi} args={[e.hemi[0], e.hemi[1], e.hemi[2]]} />
@@ -75,8 +144,8 @@ export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0], fogScale 
         position={[center[0] + 6, center[1] + 14, center[2] + 8]}
         color={e.key[0]}
         intensity={e.key[1]}
-        castShadow={quality === 'high'}
-        shadow-mapSize={[2048, 2048]}
+        castShadow={q.shadows}
+        shadow-mapSize={[q.shadowMapSize, q.shadowMapSize]}
         shadow-bias={-0.0004}
         shadow-normalBias={0.02}
         shadow-camera-left={-shadowExtent}
@@ -87,13 +156,6 @@ export function Lighting({ env, shadowExtent = 10, center = [0, 0, 0], fogScale 
         shadow-camera-far={60}
       />
       <directionalLight position={[-8, 6, -6]} intensity={0.35} color={amber ? '#ffc070' : '#bcd2e0'} />
-      <Environment resolution={256} frames={1} environmentIntensity={env === 'void' ? 0.62 : 0.55}>
-        <color attach="background" args={[amber ? '#20160b' : '#14181b']} />
-        <Lightformer form="rect" intensity={amber ? 2.0 : 2.2} color={amber ? '#ffcf86' : '#f4f8f0'} position={[0, 5, 0]} rotation-x={Math.PI / 2} scale={[12, 12, 1]} />
-        <Lightformer form="rect" intensity={1.2} color={amber ? '#ffb85c' : '#dfe9f0'} position={[-6, 2, -4]} rotation-y={Math.PI / 3} scale={[6, 3, 1]} />
-        <Lightformer form="rect" intensity={0.9} color={amber ? '#ffb85c' : '#e8eef2'} position={[6, 2, 4]} rotation-y={-Math.PI / 1.5} scale={[6, 3, 1]} />
-        <Lightformer form="ring" intensity={0.6} color="#ffffff" position={[0, 1, 8]} scale={3} />
-      </Environment>
     </>
   );
 }

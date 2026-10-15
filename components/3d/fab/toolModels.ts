@@ -230,6 +230,8 @@ type Box6 = [number, number, number, number, number, number];
 const FRONT_YAW = Math.PI / 2;
 
 const rbCache = new Map<string, THREE.BufferGeometry>();
+/** Size of each rounded box (the phone build draws them as plain boxes). */
+const rbSize = new WeakMap<THREE.BufferGeometry, V3>();
 /** Low-poly rounded box (one rounding segment: a soft chamfer, 108 triangles). */
 export function rbGeo(w: number, h: number, d: number, r: number) {
   const rr = Math.max(1e-4, Math.min(r, w / 2 - 1e-4, h / 2 - 1e-4, d / 2 - 1e-4));
@@ -238,6 +240,7 @@ export function rbGeo(w: number, h: number, d: number, r: number) {
   if (!g) {
     const rg = new RoundedBoxGeometry(w, h, d, 1, rr);
     rbCache.set(key, (g = rg.index ? rg.toNonIndexed() : rg));
+    rbSize.set(g, [w, h, d]);
   }
   return g;
 }
@@ -993,8 +996,31 @@ function portOffsets(t: ToolInstance) {
   return t.ports.map((p) => s * (p.x - t.x) + c * (p.z - t.z));
 }
 
-function buildTool(tool: ToolInstance): ToolModel {
-  const k = new Kit();
+/**
+ * Phone build of a tool, for the landing view only (the whole fab, from a distance, on a small
+ * screen): parts whose largest dimension is under LITE_MIN (bolt heads, screw caps, small
+ * knobs) are left out, rounded boxes become plain boxes (12 triangles instead of 108) and
+ * cylinders get fewer sides. At that distance these details are a pixel or two, but they are
+ * most of the fab's triangles.
+ */
+const LITE_MIN = 0.016;
+class LiteKit extends Kit {
+  add(m: THREE.Material, g: THREE.BufferGeometry, pos: V3 = [0, 0, 0], rot: V3 = [0, 0, 0], scale: V3 = [1, 1, 1], o: PartOpts = {}) {
+    if (!g.boundingBox) g.computeBoundingBox();
+    const b = g.boundingBox!;
+    const size = Math.max((b.max.x - b.min.x) * Math.abs(scale[0]), (b.max.y - b.min.y) * Math.abs(scale[1]), (b.max.z - b.min.z) * Math.abs(scale[2]));
+    if (size < LITE_MIN) return this;
+    const rb = rbSize.get(g);
+    if (rb) return super.add(m, _box, pos, rot, [rb[0] * scale[0], rb[1] * scale[1], rb[2] * scale[2]], o);
+    return super.add(m, g, pos, rot, scale, o);
+  }
+  cyl(m: THREE.Material, r: number, h: number, pos: V3 = [0, 0, 0], rot: V3 = [0, 0, 0], seg = 32, o: PartOpts & { open?: boolean; top?: number } = {}) {
+    return super.cyl(m, r, h, pos, rot, Math.max(6, Math.round(seg * 0.6)), o);
+  }
+}
+
+function buildTool(tool: ToolInstance, lite = false): ToolModel {
+  const k = lite ? new LiteKit() : new Kit();
   const t = new T(k);
   const { type, length: L, depth } = tool;
   const ports = portOffsets(tool);
@@ -1053,8 +1079,12 @@ export interface FabToolsModel {
   bounds: THREE.Box3[];
 }
 
-/** Build every tool of the fab and merge each finish across all of them. */
-export function buildFabTools(tools: ToolInstance[]): FabToolsModel {
+/**
+ * Build every tool of the fab and merge each finish across all of them.
+ * `lite` (phones) leaves out sub-centimetre parts; `caster: false` (no shadow maps) skips the
+ * shadow caster.
+ */
+export function buildFabTools(tools: ToolInstance[], o: { lite?: boolean; caster?: boolean } = {}): FabToolsModel {
   const models = new Map<string, ToolModel>();
   const bins = new Map<string, { material: Mat; shell: boolean; geos: THREE.BufferGeometry[] }>();
   const casters: THREE.BufferGeometry[] = [];
@@ -1063,7 +1093,7 @@ export function buildFabTools(tools: ToolInstance[]): FabToolsModel {
   for (const tool of tools) {
     const key = `${tool.type}:${tool.length.toFixed(2)}:${tool.depth.toFixed(2)}`;
     let model = models.get(key);
-    if (!model) models.set(key, (model = buildTool(tool)));
+    if (!model) models.set(key, (model = buildTool(tool, !!o.lite)));
     m.makeRotationY(tool.rot).setPosition(tool.x, 0, tool.z);
     for (const p of model.parts) {
       const bk = `${p.material.uuid}:${p.shell ? 1 : 0}`;
@@ -1071,7 +1101,7 @@ export function buildFabTools(tools: ToolInstance[]): FabToolsModel {
       if (!b) bins.set(bk, (b = { material: p.material, shell: p.shell, geos: [] }));
       b.geos.push(p.geometry.clone().applyMatrix4(m));
     }
-    casters.push(model.caster.clone().applyMatrix4(m));
+    if (o.caster !== false) casters.push(model.caster.clone().applyMatrix4(m));
     bounds.push(model.bounds);
   }
   const parts: BakedPart[] = [];
@@ -1082,7 +1112,7 @@ export function buildFabTools(tools: ToolInstance[]): FabToolsModel {
     g.computeBoundingSphere();
     parts.push({ material: b.material, geometry: g, shell: b.shell, cast: false });
   }
-  const caster = casterGeometry(casters, 0);
+  const caster = casters.length ? casterGeometry(casters, 0) : null;
   casters.forEach((g) => g.dispose());
   for (const md of models.values()) {
     md.parts.forEach((p) => p.geometry.dispose());

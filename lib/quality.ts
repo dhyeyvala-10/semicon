@@ -10,7 +10,7 @@
  *             already tiny), no shadow maps (kit models keep their baked contact shadows),
  *             a smaller environment map, the hero fab drops detail it cannot show.
  *   tablet  : large touch screen. As a phone, at its own pixel ratio.
- *   desktop : pixel ratio up to min(dpr, 2), MSAA, PCF shadow maps.
+ *   desktop : as before: pixel ratio up to min(dpr, 1.5), MSAA, PCF shadow maps.
  *
  * `?quality=low` forces the phone tier, `?quality=high` the desktop tier.
  */
@@ -90,9 +90,8 @@ function detect(): Quality {
   if (force === 'high') tier = 'desktop';
 
   if (tier === 'desktop') {
-    // low-end laptops (few cores / little memory) stay at 1.5x on high-density screens
-    const weak = memory <= 4 || cores <= 4;
-    const dprMax = Math.min(deviceDpr, weak ? 1.5 : 2);
+    // fill rate, not geometry, is what costs most on laptop GPUs
+    const dprMax = Math.min(deviceDpr, 1.5);
     return fix({ ...DESKTOP, deviceDpr, dprMax, dprFloor: Math.min(dprMax, 1) });
   }
 

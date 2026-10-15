@@ -3,13 +3,12 @@
  * Back end of line (§36–§39) — 1 world unit = 100 nm. SCHEMATIC proportions.
  *   contacts:    pre-metal dielectric → contact holes → Ti/TiN liner → tungsten fill → W CMP
  *   damascene:   low-k → trench pattern → trench etch → barrier/seed → Cu plating (bottom-up) → Cu CMP
- *   stack:       M1 → M12, each level thicker and wider; toggle levels to look inside
+ *   stack:       M1 → M12, each level thicker and wider
  *   passivation: top pads → SiN/oxide → pad windows → polyimide
  */
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Html } from '@react-three/drei';
 import type { SceneProps } from '../SceneSwitcher';
 import { Lighting, VoidBackdrop } from '../environments';
 import { shell, XRAY } from '../materials';
@@ -311,22 +310,14 @@ function LevelMesh({ L, visible, explode }: { L: Level; visible: boolean; explod
 }
 
 function Stack() {
-  const [hidden, setHidden] = useState<Set<number>>(new Set());
+  // levels hidden to look inside (the on-screen level toggles are gone with the 3D labels)
+  const [hidden] = useState<Set<number>>(() => new Set());
   const view = useUI((s) => s.view);
-  const info = useUI((s) => s.info);
-  const started = useUI((s) => s.started);
   const ex = useRef(0);
   useFrame((_, dt) => {
     ex.current += ((view === 'exploded' ? 1 : 0) - ex.current) * Math.min(1, dt * 3);
     track('focus', 0, 6, 0);
   });
-  const toggle = (k: number) =>
-    setHidden((h) => {
-      const n = new Set(h);
-      if (n.has(k)) n.delete(k);
-      else n.add(k);
-      return n;
-    });
   const top = LEVELS[11].y + LEVELS[11].h;
   return (
     <group>
@@ -343,23 +334,6 @@ function Stack() {
         <TechLabel key={t as string} position={[5.6, y as number, 5]} title={t as string} min={1} />
       ))}
       <TechLabel position={[-5.6, top + 1.2, 5]} title="METAL STACK · SCHEMATIC" lines={['finer wires near the transistors, thick wide wires on top']} min={1} value={() => `${engine.tele.value('levels', 12).toFixed(0)} levels`} />
-      {started && info >= 1 && (
-        <Html position={[-8.5, top, -5]} zIndexRange={[20, 0]}>
-          <div className="level-toggles" onPointerDown={(e) => e.stopPropagation()}>
-            <div className="cap">LEVELS</div>
-            {LEVELS.slice()
-              .reverse()
-              .map((L) => (
-                <button key={L.k} className={`btn sm ${hidden.has(L.k) ? '' : 'on'}`} onClick={() => toggle(L.k)}>
-                  M{L.k}
-                </button>
-              ))}
-            <button className="btn sm" onClick={() => setHidden(new Set())}>
-              ALL
-            </button>
-          </div>
-        </Html>
-      )}
     </group>
   );
 }

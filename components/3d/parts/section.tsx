@@ -6,10 +6,9 @@
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Html, Line } from '@react-three/drei';
+import { Line } from '@react-three/drei';
 import { scaleRegions } from '@/lib/runtime';
 import { useUI } from '@/lib/store';
-import { formatLength } from '@/lib/math';
 import type { V3 } from './primitives';
 
 /** Extrude a 2D polygon (x right, y up) along z by `depth`, centred on z. */
@@ -75,8 +74,8 @@ const borderMat = new THREE.LineBasicMaterial({ color: '#a9c48a' });
 
 /**
  * Magnified inset: a dark backplate + frame at `position`, a leader line to `anchor`,
- * a label with the represented field width, and a scale-region registration.
- * Children are drawn in inset-local units (1 unit = `mpu` metres).
+ * and a scale-region registration. Children are drawn in inset-local units (1 unit = `mpu`
+ * metres). The redesign shows no text labels in the 3D view, so `title` is not drawn.
  */
 export function Inset({
   id,
@@ -84,7 +83,6 @@ export function Inset({
   size = [1.2, 0.8],
   anchor,
   mpu,
-  title,
   children,
   schematic = true,
   rotationY = 0,
@@ -102,7 +100,6 @@ export function Inset({
   /** keep visible in factory / machine camera modes (default: hidden there to keep machine views clear) */
   always?: boolean;
 }) {
-  const info = useUI((s) => s.info);
   const cam = useUI((s) => s.cameraMode);
   const hidden = !always && (cam === 'factory' || cam === 'machine');
   useEffect(() => {
@@ -112,6 +109,7 @@ export function Inset({
     };
   }, [id, position, size, mpu, schematic]);
   const [w, h] = size;
+  const leader = useStablePoints(anchor ? [[0, -h / 2, -0.02], [anchor[0] - position[0], anchor[1] - position[1], anchor[2] - position[2]]] : []);
   if (hidden) return null;
   return (
     <group position={position} rotation={[0, rotationY, 0]}>
@@ -124,10 +122,7 @@ export function Inset({
       <group>{children}</group>
       {anchor && (
         <Line
-          points={[
-            [0, -h / 2, -0.02],
-            [anchor[0] - position[0], anchor[1] - position[1], anchor[2] - position[2]],
-          ]}
+          points={leader}
           color="#a9c48a"
           lineWidth={1}
           dashed
@@ -137,20 +132,25 @@ export function Inset({
           opacity={0.7}
         />
       )}
-      {info >= 2 && (
-        <Html position={[-w / 2, h / 2, 0]} style={{ pointerEvents: 'none' }} zIndexRange={[15, 0]}>
-          <div className="inset-label">
-            <span>{title}</span>
-            <span className="inset-scale">FIELD ≈ {formatLength(w * mpu)}{schematic ? ' · SCHEMATIC' : ''}</span>
-          </div>
-        </Html>
-      )}
     </group>
   );
 }
 
+/**
+ * The same points array for as long as the values are the same. drei's <Line> rebuilds its
+ * geometry when the `points` array changes and then also disposes its material, which makes
+ * the next draw compile the line's shader program again; callers pass inline arrays, so every
+ * re-render of a scene would do that.
+ */
+function useStablePoints(points: V3[]): V3[] {
+  const key = points.map((p) => p.join(',')).join(';');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => points, [key]);
+}
+
 /** Animated dashed flow line (gas/liquid/beam directions). */
 export function FlowLine({ points, color = '#a9cf9a', speed = 0.6, width = 1.5, opacity = 0.8 }: { points: V3[]; color?: string; speed?: number; width?: number; opacity?: number }) {
+  const pts = useStablePoints(points);
   const ref = useRef<{ material: { dashOffset: number } } | null>(null);
   useFrame((_, dt) => {
     if (ref.current) ref.current.material.dashOffset -= dt * speed;
@@ -158,7 +158,7 @@ export function FlowLine({ points, color = '#a9cf9a', speed = 0.6, width = 1.5, 
   return (
     <Line
       ref={ref as never}
-      points={points}
+      points={pts}
       color={color}
       lineWidth={width}
       dashed

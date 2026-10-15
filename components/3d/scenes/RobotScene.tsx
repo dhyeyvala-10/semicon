@@ -13,7 +13,7 @@
 import * as THREE from 'three';
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Html, Line } from '@react-three/drei';
+import { Line } from '@react-three/drei';
 import type { SceneProps } from '../SceneSwitcher';
 import { Lighting, CleanroomBay } from '../environments';
 import { M } from '../materials';
@@ -36,7 +36,6 @@ const Y0 = 0.85; // robot frame origin (world y)
 const PORT_X = STATIONS.foup.r; // FOUP centre x (wafer centres)
 const OHT_Y = 4.1;
 const waferMat = new THREE.MeshStandardMaterial({ color: '#8f97a3', roughness: 0.07, metalness: 0.92 });
-const SEQ = ['HOME', 'PICK', 'VERIFY', 'ROTATE', 'TRANSFER', 'PLACE', 'VERIFY', 'RETURN'];
 
 /** EFEM envelope: x ±0.42 (load ports on +X, process tool on −X), z ±0.8, floor deck at 0.41, FFU above 2.15. */
 const EF = { hx: 0.42, hz: 0.8, deck: 0.39, top: 2.15 };
@@ -528,12 +527,11 @@ function ProcessChamber({ st }: { st: MergedModel }) {
   );
 }
 
-/** Recent end-effector path (motion trail) and the live step sequence. */
+/** Recent end-effector path (motion trail). */
 function MotionTrail() {
   const pts = useRef<THREE.Vector3[]>([]);
   const cur = useMemo(() => new THREE.Vector3(), []);
   const line = useRef<{ geometry: { setPositions: (a: number[]) => void } } | null>(null);
-  const seqRef = useRef<HTMLDivElement>(null);
   useFrame(() => {
     const e = engine.robot.effector();
     const v = cur.set(e.x, Y0 + e.y + 0.01, e.z);
@@ -543,33 +541,9 @@ function MotionTrail() {
       if (pts.current.length > 120) pts.current.shift();
       if (line.current && pts.current.length > 1) line.current.geometry.setPositions(pts.current.flatMap((p) => [p.x, p.y, p.z]));
     }
-    if (seqRef.current) {
-      const step = engine.robot.error ? 'ERROR' : engine.robot.stepLabel;
-      Array.from(seqRef.current.children).forEach((c, i) => {
-        (c as HTMLElement).style.borderColor = SEQ[i] === step ? 'var(--accent)' : '';
-        (c as HTMLElement).style.color = SEQ[i] === step ? 'var(--text)' : '';
-      });
-    }
     track('focus', v.x, v.y, v.z);
   });
-  const info = useUI((s) => s.info);
-  return (
-    <>
-      <Line ref={line as never} points={[[0, Y0, 0], [0.01, Y0, 0]]} color="#c3d8a4" lineWidth={1.5} transparent opacity={0.6} />
-      {info >= 2 && (
-        <Html position={[-0.3, 2.65, 0.8]} style={{ pointerEvents: 'none' }} zIndexRange={[15, 0]}>
-          <div className="tlabel" style={{ transform: 'translate(-50%,-100%)' }}>
-            <div className="tlabel-title">ROBOT SEQUENCE · SIMULATION</div>
-            <div ref={seqRef} className="seq" style={{ marginTop: 4 }}>
-              {SEQ.map((s, i) => (
-                <span key={i}>{s}</span>
-              ))}
-            </div>
-          </div>
-        </Html>
-      )}
-    </>
-  );
+  return <Line ref={line as never} points={[[0, Y0, 0], [0.01, Y0, 0]]} color="#c3d8a4" lineWidth={1.5} transparent opacity={0.6} />;
 }
 
 function Neighbours() {
