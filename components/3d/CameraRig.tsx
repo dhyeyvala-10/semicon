@@ -1,17 +1,21 @@
 'use client';
 /**
- * Camera system (§7): animated preset transitions per camera mode, follow mode,
- * cinematic cues in WATCH/LEARN, user orbit/zoom, scale probe (§106).
+ * Camera system.
+ *
+ * Story (scroll): the camera glides along each stage's camera cues, driven by the scroll.
+ * Explore: animated preset transitions per camera mode, the phase's camera cues, follow mode
+ * and a slow sway keep the subject framed, until the visitor drags or zooms. From then on the
+ * camera is theirs (`freeCamera`) until they pick a chapter or tap Recenter.
  */
 import * as THREE from 'three';
 import { useEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { OrbitControls } from '@react-three/drei';
 import type { OrbitControls as OrbitControlsImpl } from 'three-stdlib';
-import { useUI } from '@/lib/store';
+import { useUI, exploreView } from '@/lib/store';
 import { STAGE_BY_ID } from '@/data/process';
 import { SCENES, presetFor, modesFor } from '@/data/scenes';
-import { tracked, scaleRegions, scaleState, cameraRef, cameraDriver } from '@/lib/runtime';
+import { tracked, cameraRef, cameraDriver } from '@/lib/runtime';
 import { engine } from '@/simulation/engine';
 import { easeInOut } from '@/lib/math';
 import type { CameraMode, CameraPreset, Stage } from '@/types';
@@ -74,28 +78,78 @@ const ease = (x: number) => {
   return k * k * k * (k * (k * 6 - 15) + 10);
 };
 
+const UP = new THREE.Vector3(0, 1, 0);
+const swayOffset = new THREE.Vector3();
+
+/** Explore: the visitor takes the camera; automatic moves wait until a chapter pick or Recenter. */
+function takeCamera() {
+  const ui = useUI.getState();
+  if (ui.started && !story.active && !ui.freeCamera) ui.set({ freeCamera: true });
+}
+
 export function CameraRig() {
   const controls = useRef<OrbitControlsImpl>(null);
   const camera = useThree((s) => s.camera) as THREE.PerspectiveCamera;
   const size = useThree((s) => s.size);
+  const gl = useThree((s) => s.gl);
   const stageId = useUI((s) => s.stageId);
   const mode = useUI((s) => s.cameraMode);
   const nonce = useUI((s) => s.cameraNonce);
   const follow = useUI((s) => s.follow);
-  const experience = useUI((s) => s.experience);
+  const started = useUI((s) => s.started);
+  const free = useUI((s) => s.freeCamera);
   const anim = useRef<Anim | null>(null);
+  /** Explore framing (view offset, eased) and the slow sway around the target */
+  const ex = useRef({ x: 0, y: 0, on: false, swayT: 0, sway: 0 });
   const lastScene = useRef<string>('');
   const lastFocus = useRef<THREE.Vector3 | null>(null);
   const focusPrev = useRef(new THREE.Vector3());
   const delta = useRef(new THREE.Vector3());
   const lastPhase = useRef(-1);
   const lastStage = useRef('');
-  const probeAcc = useRef(0);
   const storyCam = useRef({ stage: '', keys: [] as StoryKey[], pos: new THREE.Vector3(), tgt: new THREE.Vector3(), want: new THREE.Vector3(), wantT: new THREE.Vector3(), fov: 45, offset: false });
 
   useEffect(() => {
     cameraRef.current = camera;
   }, [camera]);
+
+  // a drag (more than a few pixels) or a zoom hands the camera to the visitor; a plain tap does not
+  useEffect(() => {
+    const el = gl.domElement;
+    let down = false;
+    let sx = 0;
+    let sy = 0;
+    const onDown = (e: PointerEvent) => {
+      down = true;
+      sx = e.clientX;
+      sy = e.clientY;
+    };
+    const onMove = (e: PointerEvent) => {
+      if (!down || Math.hypot(e.clientX - sx, e.clientY - sy) < 6) return;
+      down = false;
+      anim.current = null;
+      takeCamera();
+    };
+    const onUp = () => {
+      down = false;
+    };
+    const onWheel = () => {
+      anim.current = null;
+      takeCamera();
+    };
+    el.addEventListener('pointerdown', onDown);
+    el.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+    el.addEventListener('wheel', onWheel, { passive: true });
+    return () => {
+      el.removeEventListener('pointerdown', onDown);
+      el.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+      el.removeEventListener('wheel', onWheel);
+    };
+  }, [gl]);
 
   // preset transitions
   useEffect(() => {
@@ -118,6 +172,10 @@ export function CameraRig() {
     const sceneChanged = lastScene.current !== st.scene;
     lastScene.current = st.scene;
     lastFocus.current = null;
+    // the visitor holds the camera: no automatic move (a chapter pick or Recenter clears this first)
+    if (!sceneChanged && useUI.getState().started && useUI.getState().freeCamera) return;
+    ex.current.swayT = 0;
+    ex.current.sway = 0;
     if (sceneChanged) {
       // arrive: start pulled back along the view direction, then glide in
       const dir = p1.clone().sub(t1);
@@ -137,10 +195,30 @@ export function CameraRig() {
     if (!c) return;
     const sr = storyCam.current;
     c.enabled = !story.active;
-    if (!story.active && sr.offset) {
-      camera.clearViewOffset();
-      sr.offset = false;
-    }
+    if (!story.active) {
+      // Explore: lift the subject into the part of the screen the bottom card leaves free
+      // (eased; coming from the story it starts from the story's framing)
+      const e = ex.current;
+      if (sr.offset && !e.on) {
+        e.x = story.frame.x;
+        e.y = story.frame.y;
+      }
+      const wantY = useUI.getState().started ? exploreView.frameY : 0;
+      const k = 1 - Math.exp(-Math.min(dt, 0.1) * 5);
+      e.x += (0 - e.x) * k;
+      e.y += (wantY - e.y) * k;
+      if (Math.abs(e.x) < 1e-4) e.x = 0;
+      if (Math.abs(wantY - e.y) < 1e-4) e.y = wantY;
+      if (e.x !== 0 || Math.abs(e.y) > 1e-4) {
+        camera.setViewOffset(size.width, size.height, -e.x * size.width, e.y * size.height, size.width, size.height);
+        sr.offset = true;
+        e.on = true;
+      } else if (sr.offset) {
+        camera.clearViewOffset();
+        sr.offset = false;
+        e.on = false;
+      }
+    } else ex.current.on = false;
     const frameOffset = () => {
       // keep the subject clear of the text column
       const w = size.width;
@@ -223,9 +301,13 @@ export function CameraRig() {
       if (a.u >= 1) anim.current = null;
     }
 
+    // Explore while the camera is automatic: follow the tracked object, take the phase's
+    // camera cues, sway slowly. Once the visitor drags or zooms, none of this runs.
+    const auto = started && !free;
+
     // follow the tracked focus object (wafer / FOUP / die / package)
     const focus = tracked.get('focus');
-    if (follow && focus) {
+    if (auto && follow && focus) {
       if (lastFocus.current) {
         const d = delta.current.subVectors(focus, lastFocus.current);
         if (d.lengthSq() > 0 && d.lengthSq() < 25) {
@@ -246,49 +328,32 @@ export function CameraRig() {
       lastFocus.current = focusPrev.current.copy(focus);
     } else lastFocus.current = null;
 
-    // cinematic cues (WATCH / LEARN): phase-specific camera modes
-    if (experience === 'watch' || experience === 'learn') {
-      const v = engine.player.view;
-      if (lastStage.current !== engine.stage.id) {
-        lastStage.current = engine.stage.id;
-        lastPhase.current = v.phaseIndex;
-      } else if (v.phaseIndex !== lastPhase.current) {
-        lastPhase.current = v.phaseIndex;
-        const cue = v.phase.camera as CameraMode | undefined;
-        const st = engine.stage;
-        if (cue && cue !== useUI.getState().cameraMode && presetFor(st.scene, st.variant, cue)) useUI.getState().setCamera(cue);
-      }
+    // the phase's camera cue (the same cues the story follows)
+    const v = engine.player.view;
+    if (lastStage.current !== engine.stage.id) {
+      lastStage.current = engine.stage.id;
+      lastPhase.current = v.phaseIndex;
+    } else if (v.phaseIndex !== lastPhase.current) {
+      lastPhase.current = v.phaseIndex;
+      const cue = v.phase.camera as CameraMode | undefined;
+      const st = engine.stage;
+      if (auto && cue && cue !== useUI.getState().cameraMode && presetFor(st.scene, st.variant, cue)) useUI.getState().setCamera(cue);
     }
-    c.autoRotate = experience === 'watch' && !anim.current;
-    c.autoRotateSpeed = 0.25;
-    c.update();
 
-    // scale probe
-    probeAcc.current += dt;
-    if (probeAcc.current > 0.15) {
-      probeAcc.current = 0;
-      const st = STAGE_BY_ID[useUI.getState().stageId];
-      const cfg = SCENES[st?.scene ?? 'fab'];
-      let mpu = presetFor(cfg.id, st?.variant, 'factory')?.mpu ?? cfg.mpu;
-      let schematic = !!st?.schematic;
-      let label = '';
-      for (const r of scaleRegions.values()) {
-        if (r.center.distanceTo(c.target) < r.radius) {
-          mpu = r.mpu;
-          schematic = !!r.label;
-          label = r.label ?? '';
-        }
+    // a slow sway around the subject (about ±11° over ~40 s), never while gliding
+    c.autoRotate = false;
+    if (auto && !anim.current) {
+      const e = ex.current;
+      e.swayT += dt;
+      const want = Math.sin(e.swayT * 0.16) * 0.2;
+      const d = want - e.sway;
+      e.sway = want;
+      if (d !== 0) {
+        swayOffset.subVectors(camera.position, c.target).applyAxisAngle(UP, d);
+        camera.position.copy(c.target).add(swayOffset);
       }
-      const sceneOverride = (scaleState as { override?: number }).override;
-      if (sceneOverride) mpu = sceneOverride;
-      const d = camera.position.distanceTo(c.target);
-      const viewH = 2 * d * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-      scaleState.metersPerPixel = (viewH * mpu) / Math.max(1, size.height);
-      scaleState.viewWidth = (viewH * mpu * size.width) / Math.max(1, size.height);
-      scaleState.schematic = schematic;
-      scaleState.label = label;
-      scaleState.version++;
     }
+    c.update();
   });
 
   return (
@@ -300,9 +365,6 @@ export function CameraRig() {
       minDistance={0.05}
       maxDistance={400}
       maxPolarAngle={Math.PI * 0.495}
-      onStart={() => {
-        anim.current = null;
-      }}
     />
   );
 }

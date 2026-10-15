@@ -1,0 +1,379 @@
+/* =========================================================================
+   EXPLORE — the free 3D view (components/explore).
+   Phones first: everything sits in one stack at the bottom (caption card, then the chapter
+   row) and the rest of the screen is 3D. Wide screens: a compact card in the bottom-left
+   corner above the chapter row.
+
+   Built on app/tokens.css. Over the canvas: no backdrop-filter, no filters or blend modes,
+   only transform and opacity animate.
+   ========================================================================= */
+
+.ex {
+  position: absolute;
+  z-index: 45; /* above the scene fade (40), below the top bar (50) */
+  inset: 0;
+  pointer-events: none;
+}
+
+.ex-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 0 calc(10px + var(--safe-bottom));
+  pointer-events: none;
+}
+
+.ex-main {
+  position: relative;
+  margin: 0 max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+}
+
+/* ---------------- caption card ---------------- */
+
+.ex-card {
+  padding: 14px 14px 14px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+}
+
+.ex-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.ex-titles {
+  flex: 1;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.ex-step {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.ex-card h2 {
+  margin-top: 2px;
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  text-wrap: balance;
+}
+
+.ex-play {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-ink);
+  transition: transform var(--t-fast) var(--ease);
+}
+
+.ex-play svg path {
+  fill: currentColor;
+}
+
+.ex-play:active {
+  transform: scale(0.94);
+}
+
+/* what is happening right now (written by the 4 Hz caption timer) */
+.ex-now {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin-top: 12px;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--text);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.ex-now i {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.ex-now span {
+  display: block;
+}
+
+.ex-more {
+  margin-top: 10px;
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  line-height: var(--lh-body);
+  text-wrap: pretty;
+}
+
+.ex-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.ex-actions .btn {
+  padding: 0 16px 0 12px;
+}
+
+/* ---------------- chapter row ---------------- */
+
+.ex-chips {
+  position: relative;
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
+  scroll-padding: 0 max(12px, env(safe-area-inset-left));
+  padding: 0 max(12px, env(safe-area-inset-right)) 0 max(12px, env(safe-area-inset-left));
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  pointer-events: auto;
+}
+
+.ex-chips::-webkit-scrollbar {
+  display: none;
+}
+
+.ex-chip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 16px 0 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  white-space: nowrap;
+  scroll-snap-align: start;
+  transition: transform var(--t-fast) var(--ease);
+}
+
+.ex-chip b {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.ex-chip:active {
+  transform: scale(0.97);
+}
+
+.ex-chip[aria-current='step'] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.ex-chip[aria-current='step'] b {
+  background: var(--accent-ink);
+  color: var(--accent);
+}
+
+/* ---------------- tapped part ---------------- */
+
+.ex-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 10px);
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px 6px 14px 18px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow);
+  pointer-events: auto;
+  animation: ex-pop-in var(--t) var(--ease);
+}
+
+@keyframes ex-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+.ex-pop-text {
+  flex: 1;
+  min-width: 0;
+  padding-top: 2px;
+}
+
+.ex-pop h3 {
+  font-size: var(--fs-body);
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.ex-pop p {
+  margin-top: 4px;
+  color: var(--text-2);
+  font-size: var(--fs-small);
+  line-height: var(--lh-body);
+}
+
+.ex-x {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin-top: -10px;
+  border-radius: 50%;
+  color: var(--text-2);
+}
+
+/* ---------------- desktop hover tip ---------------- */
+
+.ex-tip {
+  position: fixed;
+  z-index: 46;
+  top: 0;
+  left: 0;
+  padding: 6px 12px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--fs-small);
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--t-fast) var(--ease);
+}
+
+.ex-tip.on {
+  opacity: 1;
+}
+
+@media (hover: hover) {
+  .ex-chip:hover {
+    border-color: var(--text-3);
+    color: var(--text);
+  }
+
+  .ex-chip[aria-current='step']:hover {
+    border-color: var(--accent);
+    color: var(--accent-ink);
+  }
+
+  .ex-x:hover {
+    background: var(--surface-3);
+    color: var(--text);
+  }
+}
+
+/* safety net: the layer toggles a few 3D scenes place in the page (drei <Html>) are not part of
+   Explore; the store keeps the label level at 0 so they are not rendered at all */
+.level-toggles {
+  display: none !important;
+}
+
+/* ---------------- short phones ---------------- */
+
+@media (orientation: portrait) and (max-height: 740px) {
+  .ex-card {
+    padding: 12px 12px 12px 16px;
+  }
+
+  .ex-card h2 {
+    font-size: 1.125rem;
+  }
+
+  .ex-now {
+    margin-top: 10px;
+    padding: 8px 12px;
+    font-size: var(--fs-small);
+  }
+
+  .ex-more {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+  }
+}
+
+/* ---------------- wide screens: a compact corner card ---------------- */
+
+@media (min-width: 900px) and (orientation: landscape) {
+  .ex-dock {
+    gap: 12px;
+    padding-bottom: calc(16px + var(--safe-bottom));
+  }
+
+  .ex-main {
+    width: 400px;
+    margin-left: max(var(--pad), env(safe-area-inset-left));
+  }
+
+  .ex-chips {
+    padding: 0 max(var(--pad), env(safe-area-inset-right)) 0 max(var(--pad), env(safe-area-inset-left));
+    scroll-padding: 0 max(var(--pad), env(safe-area-inset-left));
+  }
+
+  .ex-card {
+    padding: 18px 16px 18px 22px;
+  }
+
+  .ex-card h2 {
+    font-size: 1.375rem;
+  }
+}
+
+/* landscape phones: little height to spare, so the card goes to the corner and stays short */
+@media (orientation: landscape) and (max-height: 560px) {
+  .ex-main {
+    width: min(380px, 52vw);
+  }
+
+  .ex-more {
+    display: none;
+  }
+
+  .ex-now {
+    margin-top: 8px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ex-pop {
+    animation: none;
+  }
+}

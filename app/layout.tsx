@@ -1,18 +1,19 @@
 import type { Metadata, Viewport } from 'next';
-import '@fontsource-variable/inter';
-import '@fontsource-variable/jetbrains-mono';
+import '@fontsource-variable/plus-jakarta-sans';
+import './tokens.css';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'FAB TWIN — Semiconductor Manufacturing Digital Twin',
-  description:
-    'Local-first interactive 3D digital twin of semiconductor manufacturing: from quartz to crystal, wafer, fab, transistor, die, package and the computer it ends up in.',
+  title: 'How a computer chip is made · FAB/TWIN',
+  description: 'Scroll through 13 short steps and watch, in 3D, how ordinary sand becomes the chip inside your computer.',
 };
 
 export const viewport: Viewport = {
   width: 'device-width',
   initialScale: 1,
-  themeColor: '#07090b',
+  viewportFit: 'cover',
+  colorScheme: 'dark',
+  themeColor: '#0a0d0c', // = --bg in app/tokens.css
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

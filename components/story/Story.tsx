@@ -1,192 +1,51 @@
 'use client';
 /**
- * The scroll story: the default way through the journey.
+ * The scroll story: the default way through, in 13 plain chapters (data/chapters.ts).
  *
- * The page scrolls; the 3D world stays fixed behind it. One section per stage. The
- * section that crosses the reading line becomes the active stage, and the position
- * inside the section scrubs that stage's timeline, so the machines animate with the
- * scroll and the camera glides along the stage's camera cues (see CameraRig).
+ * The page scrolls; the 3D world stays fixed behind it and fills the screen. One section per
+ * chapter. The section on the reading line is the active chapter, and the position inside it
+ * plays the chapter's stage(s) in order, so the machines move with the scroll and the camera
+ * glides along each stage's camera cues (see CameraRig). All stages of a chapter share one
+ * scene, so scrolling inside a chapter never waits for a new scene.
  *
- * Everything that changes per frame (veil, progress, phase line) is written to the DOM
- * directly from one rAF loop. React only renders the static sections.
+ * Everything that changes while scrolling (veil, caption, progress, active card) is written
+ * to the DOM from one rAF loop. React only renders the static sections.
  */
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useUI } from '@/lib/store';
-import { useTicker } from '@/hooks/useTicker';
 import { engine } from '@/simulation/engine';
-import { JOURNEY, MACRO_LABEL, STAGE_BY_ID } from '@/data/process';
-import { JOURNEY_RIBBON, gradeAt, hex, journeyT, rgba } from '@/lib/palette';
-import { CHAPTERS, story } from '@/lib/story';
+import { STAGE_BY_ID } from '@/data/process';
+import { CHAPTERS, CHAPTER_OF_STAGE } from '@/data/chapters';
+import { HERO_STAGE, LAST_STAGE, STORY, captionAt, chapterIndexOf, chapterLocalOf, stageAt, story, type StoryChapter } from '@/lib/story';
 import { prefetchScene } from '@/components/3d/sceneLoaders';
-import { DataTag } from '@/components/ui/common';
-import { fmt } from '@/lib/math';
-import { Glyph } from './Glyph';
+import type { SceneId } from '@/types';
 
-const ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'];
-const HERO_STAGE = 'fab-overview';
-/** Set once the visitor has opened the twin; coming back, the story resumes where they were. */
-let visitedTwin = false;
+const N = STORY.length;
+const FIRST_STAGE = CHAPTERS[0].stages[0];
+
+/** Set once the visitor has opened Explore; coming back, the story resumes where they were. */
+let visitedExplore = false;
 useUI.subscribe((s) => {
-  if (s.started) visitedTwin = true;
+  if (s.started) visitedExplore = true;
 });
 
-/** Leave the story and open the full twin at a stage. */
-export function enterExplore(stageId: string) {
+/** Leave the story and open Explore at a chapter stage (the current one by default). */
+export function enterExplore(stageId: string = engine.stage.id) {
+  const id = CHAPTER_OF_STAGE[stageId] ? stageId : FIRST_STAGE;
   story.active = false;
   engine.player.driven = false;
   const ui = useUI.getState();
   ui.set({ started: true });
-  ui.goToStage(stageId, { autoplay: true });
+  if (id === engine.stage.id) {
+    // same stage: keep playing from where the scroll left it, glide to the free camera
+    engine.player.playing = true;
+    useUI.setState((s) => ({ cameraNonce: s.cameraNonce + 1 }));
+  } else ui.goToStage(id, { autoplay: true });
 }
 
-function LiveLine() {
-  useTicker(2);
-  const f = engine.fab;
-  return (
-    <span className="live-line">
-      FAB 1 NOW · {f.lots.length} lots in process · {fmt(f.utilisation(), 0)}% tools processing · {f.activeAlarms()} alarms <i>SIMULATED</i>
-    </span>
-  );
-}
-
-function Hero({ onJump }: { onJump: (stageId: string) => void }) {
-  const segments = useMemo(
-    () =>
-      JOURNEY_RIBBON.map((r) => {
-        const idx = JOURNEY.findIndex((s) => s.id === r.first);
-        const g = gradeAt(journeyT(r.first));
-        const count = JOURNEY.filter((s) => s.macro === r.macro).length;
-        return { ...r, idx, count, color: hex(g.accent), soft: rgba(g.accent, 0.14) };
-      }),
-    [],
-  );
-  const ribbon = useMemo(() => `linear-gradient(90deg, ${segments.map((s, i) => `${s.color} ${((i + 0.5) / segments.length) * 100}%`).join(', ')})`, [segments]);
-  const words = useMemo(() => [gradeAt(0), gradeAt(0.45), gradeAt(1)].map((g) => `linear-gradient(90deg, ${hex(g.glow)}, ${hex(g.accent)} 60%, ${hex(g.accent2)})`), []);
-  return (
-    <section className="st-hero landing" data-hero>
-      <div className="landing-glow" />
-      <div className="landing-main">
-        <div className="kicker">
-          <span className="pulse" /> FAB/TWIN · A WORKING DIGITAL FACTORY · LIVE SIMULATION
-        </div>
-        <h1>
-          <span style={{ backgroundImage: words[0] }}>From sand</span>
-          <span style={{ backgroundImage: words[1] }}>to silicon</span>
-          <span style={{ backgroundImage: words[2] }} className="last">
-            to system.
-            <svg className="scribble" viewBox="0 0 300 24" preserveAspectRatio="none">
-              <path d="M4 15 C 60 7, 120 21, 180 12 S 270 6, 296 13" />
-            </svg>
-          </span>
-        </h1>
-        <p>
-          Follow one grain of quartz as it becomes wafer <b>WF-000184</b>, then chip <b>CH-184-0412</b>, then part of a working computer. Scroll, and the factory runs each step in front of you.
-        </p>
-        <div className="cta">
-          <button className="cta-main" onClick={() => onJump(JOURNEY[0].id)}>
-            <span>↓</span> Begin the journey
-          </button>
-          <button className="cta-link" onClick={() => enterExplore(HERO_STAGE)}>
-            Explore the fab freely
-          </button>
-        </div>
-      </div>
-
-      <div className="ribbon-wrap">
-        <div className="ribbon-meta">
-          <span>EXTRACTION</span>
-          <LiveLine />
-          <span>SYSTEM</span>
-        </div>
-        <div className="ribbon">
-          {segments.map((s) => (
-            <button
-              key={s.macro}
-              className="seg-card"
-              style={{ color: s.color, ['--seg' as string]: s.color, ['--seg-soft' as string]: s.soft }}
-              onClick={() => onJump(s.first)}
-              title={`Jump to ${JOURNEY[s.idx]?.title}`}
-            >
-              <div className="seg-glyph">
-                <Glyph macro={s.macro} />
-              </div>
-              <div className="seg-n">
-                {String(s.idx + 1).padStart(2, '0')}–{String(s.idx + s.count).padStart(2, '0')}
-              </div>
-              <div className="seg-label">{s.label}</div>
-              <div className="seg-sub">{s.sub}</div>
-            </button>
-          ))}
-        </div>
-        <div className="ribbon-bar" style={{ backgroundImage: ribbon }}>
-          <div className="ribbon-sheen" />
-        </div>
-      </div>
-    </section>
-  );
-}
-
-function Chapter({ i }: { i: number }) {
-  const ch = CHAPTERS[i];
-  const s = ch.stage;
-  const fact = s.facts?.find((f) => f.kind === 'REAL') ?? s.facts?.[0];
-  const color = hex(gradeAt(journeyT(s.id)).accent);
-  return (
-    <section className="st-sec" data-i={i} data-stage={s.id} style={{ height: `${ch.length * 100}vh`, ['--seg' as string]: color }}>
-      <div className="st-copy">
-        {ch.actStart && (
-          <div className="st-act">
-            <b>ACT {ROMAN[ch.act]}</b> · {MACRO_LABEL[s.macro]}
-          </div>
-        )}
-        <div className="st-num">
-          {String(s.num).padStart(2, '0')} / {JOURNEY.length} · {s.location}
-        </div>
-        <h2>{s.title}</h2>
-        <p>{s.summary}</p>
-        <div className="st-change">
-          <span>{s.before}</span>
-          <i>→</i>
-          <span>{s.after}</span>
-        </div>
-        {fact && (
-          <div className="st-fact">
-            <b>{fact.value}</b>
-            <span>{fact.label}</span>
-            <DataTag kind={fact.kind} short />
-          </div>
-        )}
-        <button className="st-explore" onClick={() => enterExplore(s.id)}>
-          Explore this step <i>›</i>
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function Outro({ onTop }: { onTop: () => void }) {
-  return (
-    <section className="st-outro" data-outro>
-      <div className="st-copy">
-        <div className="st-act">
-          <b>END</b> · {JOURNEY.length} STEPS
-        </div>
-        <h2>From one grain of quartz to a working computer.</h2>
-        <p>Every machine you passed is still running. Open the full twin to step through any operation, inject a failure, or read the telemetry behind it.</p>
-        <div className="cta">
-          <button className="cta-main" onClick={() => enterExplore(HERO_STAGE)}>
-            Explore the twin
-          </button>
-          <button className="cta-link" onClick={onTop}>
-            Back to the start
-          </button>
-          <button className="cta-link" onClick={() => useUI.getState().setOverlay('about')}>
-            Data &amp; sources
-          </button>
-        </div>
-      </div>
-    </section>
-  );
+/** Reading line as a fraction of the screen height; lower on portrait screens, where the text sits at the bottom. */
+function readLine() {
+  return typeof window !== 'undefined' && window.innerHeight > window.innerWidth ? 0.62 : 0.5;
 }
 
 const smoothstep = (a: number, b: number, x: number) => {
@@ -194,20 +53,92 @@ const smoothstep = (a: number, b: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
+function Arrow() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden focusable="false">
+      <path d="M12 5v14M6 13l6 6 6-6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function Hero({ onStart }: { onStart: () => void }) {
+  return (
+    <section className="st-hero" data-hero aria-labelledby="st-hero-title">
+      <div className="st-hero-copy">
+        <h1 id="st-hero-title">How a computer chip is made</h1>
+        <p>Follow ordinary sand on its way to becoming the chip inside your computer, one simple step at a time.</p>
+        <div className="st-actions">
+          <button className="btn btn-primary btn-lg" onClick={onStart}>
+            Start <Arrow />
+          </button>
+          <button className="link" onClick={() => enterExplore(FIRST_STAGE)}>
+            Explore freely
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ChapterSection({ c }: { c: StoryChapter }) {
+  const ch = c.chapter;
+  const first = c.parts[0].stage;
+  return (
+    <section className="st-ch" data-i={c.index} data-chapter={ch.id} data-stage={first} style={{ ['--len' as string]: c.length }} aria-labelledby={`st-${ch.id}`}>
+      <div className="st-card">
+        <p className="st-step">
+          Step {c.index + 1} of {N}
+        </p>
+        <h2 id={`st-${ch.id}`}>{ch.title}</h2>
+        <p className="st-line">{ch.line}</p>
+        <p className="st-now">
+          <i aria-hidden />
+          <span data-cap>{captionAt(ch, first, 0)}</span>
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function Outro({ onTop }: { onTop: () => void }) {
+  return (
+    <section className="st-outro" data-outro aria-labelledby="st-outro-title">
+      <div className="st-card">
+        <h2 id="st-outro-title">That is how a chip is made</h2>
+        <p className="st-line">From sand to a working computer in {N} steps. Want a closer look? Explore any step in 3D, at your own pace.</p>
+        <div className="st-actions">
+          <button className="btn btn-primary" onClick={() => enterExplore()}>
+            Explore freely
+          </button>
+          <button className="link" onClick={onTop}>
+            Back to the start
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export function Story() {
+  const fallback = useUI((s) => s.fallback2D);
+  // without WebGL the 2D page (components/fallback) tells the same story
+  return fallback ? null : <ScrollStory />;
+}
+
+function ScrollStory() {
   const scroller = useRef<HTMLDivElement>(null);
   const veil = useRef<HTMLDivElement>(null);
-  const bar = useRef<HTMLDivElement>(null);
-  const now = useRef<HTMLDivElement>(null);
-  const ticks = useRef<HTMLDivElement>(null);
+  const veilStep = useRef<HTMLSpanElement>(null);
+  const veilTitle = useRef<HTMLSpanElement>(null);
+  const progress = useRef<HTMLDivElement>(null);
 
-  /** scroll so a stage's section sits on the reading line */
-  const jump = (stageId: string, smooth = true) => {
+  /** scroll to the start of a chapter (its section on the reading line) */
+  const goToChapter = (i: number, smooth = true) => {
     const el = scroller.current;
-    const i = CHAPTERS.findIndex((c) => c.stage.id === stageId);
     const sec = el?.querySelector<HTMLElement>(`[data-i="${i}"]`);
     if (!el || !sec) return;
-    el.scrollTo({ top: sec.offsetTop - el.clientHeight * readLine() + 2, behavior: smooth ? 'smooth' : 'auto' });
+    const glide = smooth && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    el.scrollTo({ top: sec.offsetTop - el.clientHeight * readLine() + 2, behavior: glide ? 'smooth' : 'auto' });
   };
 
   useEffect(() => {
@@ -223,50 +154,55 @@ export function Story() {
       window.history.replaceState(null, '', url.toString());
     }
 
-    // layout: section tops/heights, measured (mobile toolbars change the viewport height)
-    type Sec = { top: number; h: number; stage: string; scene: string };
-    let secs: Sec[] = [];
+    // sections in page order: hero, one per chapter, outro
+    const secs = Array.from(el.querySelectorAll<HTMLElement>('[data-hero], [data-i], [data-outro]'));
+    const K = secs.length;
+    const cards = secs.map((s) => s.querySelector<HTMLElement>('.st-card, .st-hero-copy'));
+    const caps = secs.map((s) => s.querySelector<HTMLElement>('[data-cap]'));
+    const segs = Array.from(progress.current?.children ?? []) as HTMLElement[];
+    const fills = segs.map((s) => s.firstElementChild as HTMLElement | null);
+    const chapterOf = (k: number) => (k <= 0 ? null : STORY[Math.min(N - 1, k - 1)]);
+    const sceneOf = (k: number): SceneId => (k <= 0 ? STAGE_BY_ID[HERO_STAGE].scene : (chapterOf(k)!.scene as SceneId));
+
+    // layout, measured on resize only (phone toolbars and fonts change it)
+    let H = 1;
+    let W = 1;
+    let tops: number[] = [];
+    let hs: number[] = [];
     let bounds: number[] = [];
+    let frames: { x: number; y: number }[] = [];
     const measure = () => {
-      const hero = el.querySelector<HTMLElement>('[data-hero]')!;
-      const outro = el.querySelector<HTMLElement>('[data-outro]')!;
-      secs = [{ top: hero.offsetTop, h: hero.offsetHeight, stage: HERO_STAGE, scene: STAGE_BY_ID[HERO_STAGE].scene }];
-      el.querySelectorAll<HTMLElement>('[data-i]').forEach((s) => {
-        const st = CHAPTERS[Number(s.dataset.i)].stage;
-        secs.push({ top: s.offsetTop, h: s.offsetHeight, stage: st.id, scene: st.scene });
-      });
-      const last = CHAPTERS[CHAPTERS.length - 1].stage;
-      secs.push({ top: outro.offsetTop, h: outro.offsetHeight, stage: last.id, scene: last.scene });
+      H = el.clientHeight || 1;
+      W = el.clientWidth || 1;
+      tops = secs.map((s) => s.offsetTop);
+      hs = secs.map((s) => s.offsetHeight);
       // scene changes are hidden behind the veil
       bounds = [];
-      for (let k = 1; k < secs.length; k++) if (secs[k].scene !== secs[k - 1].scene) bounds.push(secs[k].top);
-      // act ticks on the progress rail
-      const total = Math.max(1, el.scrollHeight - el.clientHeight);
-      if (ticks.current)
-        ticks.current.querySelectorAll<HTMLElement>('[data-tick]').forEach((t) => {
-          const k = CHAPTERS.findIndex((c) => c.stage.id === t.dataset.tick) + 1;
-          t.style.top = `${Math.min(100, (100 * Math.max(0, secs[k].top - el.clientHeight * readLine())) / total)}%`;
-        });
+      for (let k = 1; k < K; k++) if (sceneOf(k) !== sceneOf(k - 1)) bounds.push(tops[k]);
+      // centre the 3D subject in the part of the screen the text leaves free
+      const portrait = H > W;
+      const topInset = 72;
+      frames = cards.map((c) => {
+        if (!c) return { x: 0, y: 0 };
+        if (portrait) {
+          const free = (topInset + H - c.offsetHeight - 16) / 2;
+          return { x: 0, y: Math.min(0.24, Math.max(0, 0.5 - free / H)) };
+        }
+        const right = c.offsetLeft + c.offsetWidth;
+        return { x: Math.min(0.24, Math.max(0, (right + W) / 2 / W - 0.5)), y: -topInset / 2 / H };
+      });
     };
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(el);
+    cards.forEach((c) => c && ro.observe(c));
 
-    // resume where the visitor left the story (e.g. coming back from the twin)
-    // (a first visit always opens on the hero: the engine starts on the first stage before the store syncs it)
-    const ci = visitedTwin ? CHAPTERS.findIndex((c) => c.stage.id === engine.stage.id) : -1;
+    // resume where the visitor left the story (coming back from Explore); a first visit opens on the hero
+    const ci = visitedExplore ? chapterIndexOf(engine.stage.id) : -1;
     if (ci >= 0) {
-      const sec = secs[ci + 1];
-      el.scrollTop = sec.top - el.clientHeight * readLine() + sec.h * engine.player.view.stageT;
+      const local = chapterLocalOf(STORY[ci], engine.stage.id, engine.player.view.stageT);
+      el.scrollTop = tops[ci + 1] - H * readLine() + hs[ci + 1] * local;
     } else if (engine.stage.id !== HERO_STAGE) useUI.getState().goToStage(HERO_STAGE, { autoplay: true });
-
-    // fetch every scene module in the background so scrolling never waits for code
-    let pre = 0;
-    const order = [...new Set(CHAPTERS.map((c) => c.stage.scene))];
-    const preId = window.setInterval(() => {
-      if (pre >= order.length) return window.clearInterval(preId);
-      prefetchScene(order[pre++]);
-    }, 400);
 
     let raf = 0;
     let last = performance.now();
@@ -274,88 +210,156 @@ export function Story() {
     let lastTop = el.scrollTop;
     let vel = 0;
     let veilCur = 1;
+    let busyShown = false;
+    let busySince = 0;
+    let veilChapter = -2;
     let pending: { stage: string; since: number } | null = null;
-    let phaseKey = '';
+    // after a scene change: wait until the new scene renders smoothly before lifting the veil
+    let settling = true;
+    let switchedAt = performance.now();
+    let calm = 0;
     let activeK = -1;
-    const sections = () => [el.querySelector<HTMLElement>('[data-hero]'), ...el.querySelectorAll<HTMLElement>('[data-i]'), el.querySelector<HTMLElement>('[data-outro]')];
+    let progK = -2;
+    let progFill = -1;
+    let lastPre = 0;
+    const capShown: string[] = secs.map((s) => s.querySelector('[data-cap]')?.textContent ?? '');
+    const motion = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
     const loop = (t: number) => {
-      const dt = Math.min(0.1, (t - last) / 1000);
+      const dt = Math.min(0.25, (t - last) / 1000);
       last = t;
-      const H = el.clientHeight || 1;
       const top = el.scrollTop;
-      smooth += (top - smooth) * (1 - Math.exp(-dt * 7));
+      smooth += (top - smooth) * (1 - Math.exp(-Math.min(dt, 0.1) * 10));
       if (Math.abs(top - smooth) < 0.5) smooth = top;
       vel += ((top - lastTop) / Math.max(dt, 1e-3) / H - vel) * 0.25;
       lastTop = top;
       story.velocity = vel;
-      const portrait = H > el.clientWidth;
-      story.frame.x = portrait ? 0 : 0.15;
-      story.frame.y = portrait ? 0.16 : 0;
 
       // which section is on the reading line
       const line = smooth + H * readLine();
       let k = 0;
-      for (let j = 0; j < secs.length; j++) if (line >= secs[j].top) k = j;
-      const sec = secs[k];
-      const isOutro = k === secs.length - 1;
-      const local = isOutro ? 1 : k === 0 ? 0 : Math.min(1, Math.max(0, (line - sec.top) / sec.h));
-      const want = sec.stage;
-      // only the active chapter's copy is shown; the rest fade out
+      for (let j = 0; j < K; j++) if (line >= tops[j]) k = j;
+      const isOutro = k === K - 1;
+      const chLocal = k === 0 ? 0 : isOutro ? 1 : Math.min(1, Math.max(0, (line - tops[k]) / hs[k]));
+      const ch = chapterOf(k);
+      const at = k === 0 ? { stage: HERO_STAGE, t: 0 } : isOutro ? { stage: LAST_STAGE, t: 1 } : stageAt(ch!, chLocal);
+      const want = at.stage;
+
       if (k !== activeK) {
-        const all = sections();
-        all[activeK]?.classList.remove('on');
-        all[k]?.classList.add('on');
+        if (activeK >= 0) secs[activeK].classList.remove('on');
+        secs[k].classList.add('on');
         activeK = k;
       }
 
+      // the subject sits in the free part of the screen
+      const f = frames[k] ?? { x: 0, y: 0 };
+      const kf = 1 - Math.exp(-Math.min(dt, 0.1) * 6);
+      story.frame.x += (f.x - story.frame.x) * kf;
+      story.frame.y += (f.y - story.frame.y) * kf;
+
+      // stage switching: inside a scene at once; across scenes only once the scroll settles and the veil is down
+      const ui = useUI.getState();
       if (want !== engine.stage.id) {
         const sceneChange = STAGE_BY_ID[want].scene !== engine.stage.scene;
-        if (!pending || pending.stage !== want) pending = { stage: want, since: t };
-        // within a scene, switch at once; across scenes wait until the scroll settles a little
-        if (!sceneChange || (t - pending.since > 120 && Math.abs(vel) < 2.5)) {
-          useUI.getState().goToStage(want, { autoplay: true });
-          if (sceneChange) story.cut = true;
+        if (!sceneChange) {
+          ui.goToStage(want, { autoplay: true });
           pending = null;
+        } else {
+          if (!pending || pending.stage !== want) pending = { stage: want, since: t };
+          // the new scene is built while the veil (and the chapter's name on it) is fully shown
+          const named = k === 0 || (busyShown && t - busySince > 180);
+          if (t - pending.since > 120 && Math.abs(vel) < 1 && veilCur > 0.96 && named) {
+            ui.goToStage(want, { autoplay: true });
+            story.cut = true;
+            pending = null;
+            settling = true;
+            switchedAt = t;
+            calm = 0;
+          }
         }
       } else pending = null;
-      if (engine.stage.id === want && k > 0) engine.player.scrub(local);
-      story.local = local;
+      if (engine.stage.id === want && k > 0) engine.player.scrub(at.t);
+      story.local = at.t;
 
-      // veil: dark across scene boundaries, while waiting, and until the new scene has rendered
+      // veil: dark across scene boundaries, while waiting, and until the new scene renders smoothly
+      const loaded = ui.loadedScenes.includes(engine.stage.scene);
+      if (settling) {
+        calm = loaded && dt < 0.07 ? calm + 1 : 0;
+        if (loaded && (calm >= 3 || t - switchedAt > 2500)) settling = false;
+      }
+      // darken ahead of a scene boundary the scroll is moving towards (never while resting)
+      const dir = vel > 0.05 ? 1 : vel < -0.05 ? -1 : 0;
       let near = 0;
-      for (const b of bounds) near = Math.max(near, 1 - smoothstep(0, H * 0.2, Math.abs(line - b)));
-      const loading = !useUI.getState().loadedScenes.includes(engine.stage.scene);
-      const target = Math.max(near, pending ? 1 : 0, loading ? 1 : 0);
-      veilCur += (target - veilCur) * (1 - Math.exp(-dt * (target > veilCur ? 16 : 6)));
+      if (dir !== 0)
+        for (const b of bounds) {
+          const ahead = dir > 0 ? b - line : line - b;
+          if (ahead >= 0) near = Math.max(near, 1 - smoothstep(0, H * 0.16, ahead));
+        }
+      const busy = !!pending || settling || !loaded;
+      const target = busy ? 1 : near;
+      veilCur += (target - veilCur) * (1 - Math.exp(-Math.min(dt, 0.1) * (target > veilCur ? 22 : 9)));
+      if (Math.abs(target - veilCur) < 0.004) veilCur = target;
       story.veil = veilCur;
-      if (veil.current) veil.current.style.opacity = veilCur.toFixed(3);
-
-      const total = Math.max(1, el.scrollHeight - H);
-      if (bar.current) bar.current.style.transform = `${portrait ? 'scaleX' : 'scaleY'}(${Math.min(1, smooth / total).toFixed(4)})`;
-
-      // the operation running right now
-      const v = engine.player.view;
-      const key = k === 0 ? 'hero' : `${engine.stage.id}:${v.phaseIndex}`;
-      if (key !== phaseKey && now.current) {
-        phaseKey = key;
-        if (k === 0 || isOutro) now.current.style.opacity = '0';
-        else {
-          const n = engine.stage.phases.length;
-          now.current.style.opacity = '1';
-          now.current.innerHTML = '';
-          const b = document.createElement('b');
-          b.textContent = `${String(v.phaseIndex + 1).padStart(2, '0')}/${String(n).padStart(2, '0')}`;
-          const l = document.createElement('span');
-          l.textContent = v.phase.caption ? `${v.phase.label} — ${v.phase.caption}` : v.phase.label;
-          now.current.append(b, l);
+      if (veil.current) {
+        veil.current.style.opacity = veilCur.toFixed(3);
+        // name the chapter that is loading (not while the page is still moving)
+        const showBusy = busy && k > 0 && Math.abs(vel) < 1;
+        const vc = k > 0 ? Math.min(N - 1, k - 1) : -1;
+        if (showBusy && vc !== veilChapter && veilStep.current && veilTitle.current) {
+          veilChapter = vc;
+          veilStep.current.textContent = `Step ${vc + 1} of ${N}`;
+          veilTitle.current.textContent = STORY[vc].chapter.title;
+        }
+        if (showBusy !== busyShown) {
+          busyShown = showBusy;
+          busySince = t;
+          veil.current.classList.toggle('busy', showBusy);
         }
       }
+
+      // the live caption for what is happening right now
+      if (ch && !isOutro) {
+        const cap = captionAt(ch.chapter, want, at.t);
+        const capEl = caps[k];
+        if (capEl && cap !== capShown[k]) {
+          capShown[k] = cap;
+          capEl.textContent = cap;
+          if (motion && secs[k].classList.contains('on')) capEl.animate?.([{ opacity: 0, transform: 'translateY(4px)' }, { opacity: 1, transform: 'none' }], { duration: 220, easing: 'ease-out' });
+        }
+      }
+
+      // chapter progress: one segment per chapter, the current one fills with the scroll
+      const pk = k === 0 ? -1 : isOutro ? N : k - 1;
+      if (pk !== progK && progress.current) {
+        progK = pk;
+        progFill = -1;
+        progress.current.classList.toggle('on', pk >= 0);
+        segs.forEach((s, j) => {
+          s.className = j < pk ? 'done' : j === pk ? 'cur' : '';
+          const fl = fills[j];
+          if (fl) fl.style.transform = '';
+        });
+      }
+      if (pk >= 0 && pk < N) {
+        const v = Math.round(chLocal * 200) / 200;
+        const fl = fills[pk];
+        if (fl && v !== progFill) {
+          progFill = v;
+          fl.style.transform = `scaleX(${v})`;
+        }
+      }
+
+      // fetch the code of nearby scenes while the scroll is calm, so crossing into them never waits for the network
+      if (t - lastPre > 700 && Math.abs(vel) < 0.6) {
+        lastPre = t;
+        for (const j of [k + 1, k + 2, k - 1]) if (j >= 0 && j < K) prefetchScene(sceneOf(j));
+      }
+
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
-      window.clearInterval(preId);
       ro.disconnect();
       story.active = false;
       engine.player.driven = false;
@@ -364,29 +368,29 @@ export function Story() {
 
   return (
     <>
-      <div className="st-scrim" aria-hidden />
-      <div className="st-veil" ref={veil} aria-hidden />
-      <div className="st-scroll" ref={scroller} tabIndex={-1}>
-        <Hero onJump={jump} />
-        {CHAPTERS.map((c) => (
-          <Chapter key={c.stage.id} i={c.index} />
-        ))}
-        <Outro onTop={() => scroller.current?.scrollTo({ top: 0, behavior: 'smooth' })} />
+      <div className="st-veil" ref={veil} style={{ opacity: 1 }} aria-hidden>
+        <div className="veil-box">
+          <span className="veil-step" ref={veilStep} />
+          <span className="veil-title" ref={veilTitle} />
+          <span className="veil-bar">
+            <i />
+          </span>
+        </div>
       </div>
-      <div className="st-now" ref={now} aria-live="off" />
-      <div className="st-rail" ref={ticks} aria-hidden>
-        <div className="st-rail-fill" ref={bar} />
-        {JOURNEY_RIBBON.map((r) => (
-          <button key={r.macro} data-tick={r.first} title={r.label} onClick={() => jump(r.first)}>
-            <span>{r.label}</span>
-          </button>
+      <div className="st-scroll" ref={scroller} tabIndex={-1}>
+        <Hero onStart={() => goToChapter(0)} />
+        {STORY.map((c) => (
+          <ChapterSection key={c.chapter.id} c={c} />
+        ))}
+        <Outro onTop={() => scroller.current?.scrollTo({ top: 0 })} />
+      </div>
+      <div className="st-progress" ref={progress} aria-hidden>
+        {STORY.map((c) => (
+          <span key={c.chapter.id}>
+            <i />
+          </span>
         ))}
       </div>
     </>
   );
-}
-
-/** Reading line as a fraction of the viewport height; lower on phones, where the text sits at the bottom. */
-function readLine() {
-  return typeof window !== 'undefined' && window.innerHeight > window.innerWidth ? 0.62 : 0.5;
 }

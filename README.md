@@ -1,11 +1,15 @@
-# FAB/TWIN — a visual digital twin of semiconductor manufacturing
+# FAB/TWIN — how a computer chip is made
 
-Follow one grain of quartz as it becomes wafer **WF-000184**, then chip **CH-184-0412**, then part of a
-working computer. There are 55 journey stages and six explorable locations. Every machine runs, and
-every number on screen is labelled with where it comes from.
+Follow ordinary sand on its way to becoming the chip inside your computer, in 13 short steps,
+with a working 3D factory behind every step.
 
-It is a local-first Next.js + React Three Fiber application. It needs no backend, API keys or network
-calls at runtime; fonts and map data are bundled.
+- **Story** (the default): scroll, and each step plays in 3D. Every step has a plain title, one
+  sentence and a live caption of what is happening right now.
+- **Explore**: the same 3D, free to turn and zoom. Pick any of the 13 steps, play or pause, look
+  inside a machine, and tap a part to see what it is.
+
+It is a local-first Next.js + React Three Fiber site with no backend, API keys or network calls at
+runtime; fonts are bundled. All 3D models are built in code (no model files).
 
 ```bash
 npm install
@@ -24,143 +28,82 @@ Requires Node.js ≥ 20.9 (developed on Node 22).
 
 ---
 
-## What you can do
+## The 13 steps
 
-| Experience | What it does |
-| --- | --- |
-| **Watch** | Cinematic playback of the whole journey; the camera follows the phase cues. |
-| **Control** | Free exploration of the running fab: the fab overview, *Run fab*, failures and maintenance. |
-| **Learn** | Step-by-step, with WHY / HOW / WHAT CHANGES panels and the technical companion. |
-| **Engineer** | Telemetry, control loops, run-to-run feedback, sources and debug data. |
+| # | Step | What you see |
+| --- | --- | --- |
+| 1 | Sand becomes silicon | quarry, then pure silicon grown on red-hot rods |
+| 2 | Growing one perfect crystal | a crystal puller lifting one giant crystal from molten silicon |
+| 3 | Slicing into wafers | a web of wires cutting the crystal into thin discs |
+| 4 | Polishing to a mirror | spinning pads polishing each wafer |
+| 5 | Into the cleanroom | a sealed wafer box, and a robot that carries wafers into a machine |
+| 6 | Printing with light | a scanner printing the circuit pattern with light |
+| 7 | Carving the pattern | a plasma chamber carving the pattern into the wafer |
+| 8 | Changing the silicon | a beam of atoms fired into the silicon |
+| 9 | Adding thin layers | chambers that grow films a few atoms thick |
+| 10 | Wiring it all together | copper wires built layer by layer (close-up) |
+| 11 | Testing every chip | the wafer map of good and bad chips |
+| 12 | Cutting and packaging | gold wires connecting the chip to its package |
+| 13 | Into your computer | the chip on a motherboard inside a computer |
 
-- **Camera modes:** factory · machine · internal · wafer · microscopic · transistor · data, plus *Follow* (the followed wafer, FOUP, die or package).
-- **View modes** (per scene): normal · cut-away · cross-section · x-ray · exploded.
-- **Information layers L1–L4:** visual only → labels → engineering values → deep dive.
-- **Wafer digital twin:** identity, location, layers, cycles, inspection, test and package state, with a full history. It stays consistent when you jump around the journey.
-- **What-if:** inject failures (contamination, misalignment, robot vacuum loss, temperature drift, etch variation, defect excursion, melt disturbance, wire tension, downtime). Also maintenance mode, the misalignment slider and method toggles (CVD/PVD/ALD, dry/wet etch, wire-bond/flip-chip, 2.5D/3D/chiplets, CPU/GPU).
-- **Overlays:** search (Ctrl/⌘ K), fab map, process map, machine map, robotics, materials, glossary, comparisons, failures, fab dashboard, control loops & R2R, about & sources.
-- **2D technical view:** a fallback that runs on the same simulation. It switches on automatically without WebGL.
+The text lives in [`data/chapters.ts`](data/chapters.ts). Each step plays one or more of the
+detailed process stages in `data/process.ts` that share one 3D scene.
 
-### Keyboard
+### Keys and links
 
-| Key | Action |
-| --- | --- |
-| Space | play / pause |
-| ← / → | step one operation back / forward |
-| Shift + ← / → | previous / next stage |
-| 1 – 4 | information layer |
-| Ctrl/⌘ + K | search |
-| Esc | close overlay / panel / selection |
-| `` ` `` | debug overlay |
+In Explore: ← / → change step, Space plays or pauses, Esc closes a part card.
+`?stage=<stage id>` opens Explore at that stage (for example `?stage=lithography`), `?mode=2d`
+forces the simple no-3D page, and `?quality=low` / `?quality=high` override the automatic
+phone / desktop graphics setting.
 
-### URL parameters
-
-`?stage=<id>` deep-links to a stage (for example `?stage=lithography`, `?stage=metal-stack`, `?stage=control-room`).
-`?exp=watch|control|learn|engineer` sets the experience mode, `?mode=2d` forces the 2D view,
-`?quality=low` uses a lighter renderer (automatic on mobile), and `?debug=1` shows the debug overlay.
-
----
-
-## The journey
-
-| Macro phase | Stages |
-| --- | --- |
-| Raw material | quartz · metallurgical silicon (arc furnace) · trichlorosilane purification · Siemens polysilicon |
-| Silicon crystal | Czochralski growth · ingot removal |
-| Wafering | cropping · OD grinding · orientation notch · multi-wire slicing · edge profiling · lapping · chemical etch · polishing · cleaning · prime-wafer inspection |
-| Fab entry | FOUP, load port, EFEM robot, pre-aligner |
-| FEOL | oxidation · CVD/PVD/ALD · resist coat · soft bake · reticle · alignment · step-and-scan exposure · develop · dry/wet etch · strip · implant · RTP anneal · gap fill · CMP · repeated layer cycles 17–19 · transistor build · planar / FinFET / GAA |
-| BEOL | contacts · copper dual damascene · M1–M12 stack · passivation |
-| Test | metrology · inspection & wafer map · electrical test · wafer sort |
-| Package | dicing · known-good-die pick · die attach · wire bond / flip-chip · 2.5D / 3D / chiplets · final package |
-| Distribution | final test · binning · tape & reel / dry pack · warehouse · global distribution · CPU/GPU systems · ecosystem finale |
-
-Explore locations: **fab overview** (bays, OHT, stockers, airflow and particles, utilities, *Run fab*),
-**control room** (a video wall driven by the fab simulation), **utilities campus**,
-**supply-chain graph**, **robot lab** (manual jog of the EFEM robot) and the **powers-of-ten scale journey**.
-
----
-
-## Honest data
-
-Every value carries a classification:
-
-- **REAL** — publicly documented and cited, for example the silicon melting point (1414 °C), the Deal–Grove constants and the EUV wavelength (13.5 nm).
-- **REPRESENTATIVE** — a typical textbook range, not a specific fab's recipe.
-- **SIMULATED** — produced by the running simulation: telemetry, wafer maps, yields, bins.
-- **CONCEPTUAL** — illustrative structure: schematic scales, generic layouts, illustrative routes.
-
-All equipment is an *industry-inspired educational model*. No proprietary architecture, recipe or
-process data is reproduced. Supply-chain nodes are generic categories, never companies, and globe
-locations are illustrative by region. The sources panel lists 25 references (Plummer, Sze, Deal & Grove,
-Czochralski, Dash, Kern, Meyerhofer, Preston, Mack, ISO 14644-1, SEMI M1/E47.1/E84, IRDS 2023,
-SIA–BCG 2021, Natural Earth and others).
+All equipment is an *industry-inspired educational model*: no proprietary design, recipe or
+process data is reproduced, and no company names are used.
 
 ---
 
 ## Architecture
 
-A runtime architecture diagram (made with [Archify](https://github.com/tt-a1i/archify), every node linked to the source lines it describes) lives in
-[`.archify/architecture-fab-twin-runtime-20261012-074517/fab-twin-runtime.html`](.archify/architecture-fab-twin-runtime-20261012-074517/fab-twin-runtime.html) — open it in a browser.
-Its source is `candidate.json` next to it.
+A runtime architecture diagram (made with [Archify](https://github.com/tt-a1i/archify)) lives in
+[`.archify/architecture-fab-twin-runtime-20261012-074517/fab-twin-runtime.html`](.archify/architecture-fab-twin-runtime-20261012-074517/fab-twin-runtime.html).
 
 ```
-app/                 Next.js App Router entry, global styles (green journey palette)
+app/                 Next.js entry, design tokens (tokens.css), base + story styles (globals.css),
+                     explore styles (explore.css); one typeface: Plus Jakarta Sans
 components/
-  App.tsx            shell: init, deep links, keyboard, finale trigger, layout
-  ui/                TopBar, ProcessRail, StageHUD, WaferHUD, Toolbar/Transport, SidePanel
-                     (inspector, machine, companion, data, wafer twin, sources), Overlays, Landing,
-                     Loader, colour-grade overlay
-  charts/            sparkline, line chart with bands, wafer-map SVG, bars
-  fallback/          2D technical view
+  App.tsx            shell: start-up, deep link, story or explore
+  story/             the scroll story (hero, 13 steps, outro) and the logo
+  explore/           the free 3D view (step chips, caption card, part cards with plain descriptions)
+  ui/                top bar, loader and scene-change veil, colour grade
+  fallback/          the no-3D page
   3d/
-    Stage3D.tsx      Canvas, renderer settings
-    CameraRig.tsx    presets per scene × camera mode, follow, cinematic cues, scale probe
-    SceneSwitcher.tsx  lazy-loaded scenes (one module per scene, next one prefetched)
-    environments.tsx lighting (tinted by the journey grade), cleanroom / hall / assembly rooms
-    materials.ts     shared material library, x-ray / cut-away shells
-    parts/           primitives, interaction (clickable, labels, sensors), wafer & FOUP,
-                     robot arm, cluster tool, cross-section profiles and insets, atoms,
-                     people, live screens, earth texture
-    scenes/          29 scenes (fab, materials, crystal, ingot, finishing, robot, thermal,
-                     deposition, track, lithography, etch, implant, CMP, cycle, transistor,
-                     interconnect, metrology, inspection, probe, dicing, packaging, final test,
-                     shipping, globe, supply chain, control room, utilities, system, scale)
-data/                stages & telemetry (process.ts), scenes & camera presets, machines, robots,
-                     sensors, materials, glossary, failures, comparisons, sources, fab layout,
-                     supply chain, object descriptions
-simulation/
-  engine.ts          singleton rAF loop: stage player, twin, telemetry, fab, robot, control loops
-  player.ts          play / pause / step / seek / speed / auto-advance / before-after override
-  twin.ts            wafer digital twin with a legal state-transition table and deterministic rebuild
-  telemetry.ts       ring-buffered channels, phase-gated warn/fault bands
-  models.ts          physics-flavoured models shared by geometry *and* telemetry: Czochralski radius,
-                     Deal–Grove, spin coat ∝ ω^-½, etch profile, implant range, RTP, CMP (Preston),
-                     exposure fields, die grid, simulated wafer map, metrology ground truth
-  fab.ts             discrete-event fab: tools, lots, dispatch, OHT vehicles, metrics, alarms
-  robot.ts           θ–R–Z SCARA controller with synchronised trapezoidal moves and a vacuum interlock
-  control.ts         PID loops and EWMA run-to-run control
-lib/                 UI store (zustand), runtime registries, journey colour grading (OKLCH),
-                     search, audio, offline assistant (with an optional remote-provider interface)
+    Stage3D.tsx      canvas and renderer settings
+    CameraRig.tsx    story camera (driven by the scroll) and explore camera (free after a drag)
+    SceneSwitcher.tsx  lazy-loaded scenes, one module per scene
+    environments.tsx lighting and rooms
+    kit/             procedural modelling kit: merged geometry per finish, one shadow caster per model
+    parts/           shared parts (wafer and box, robot arm, cluster tool, cross-sections, ...)
+    scenes/          one module per scene
+data/                the 13 steps (chapters.ts), process stages, scenes and camera presets,
+                     machines, robots, materials, fab layout
+simulation/          the engine: stage player, wafer twin, fab simulation, robot controller
+lib/                 UI store (zustand), story runtime, quality tiers, runtime registries
 types/               domain types
 ```
 
 Key ideas:
 
-- **Scenes are pure functions of the stage player's view** (`phaseId`, `phaseT`, `stageT`). Scrubbing, stepping, before/after previews and the 2D view therefore always agree with the 3D world.
-- **One model drives geometry and data.** For example, the oxide thickness drawn in the cross-section is the same Deal–Grove value plotted in the HUD, and the etch profile, CMP step height and implant depth work the same way.
-- **The UI reads the engine at a fixed tick** (`useTicker`). The 3D layer reads it inside `useFrame`, so no 60 fps state goes through React.
-- **Journey colour grading:** a continuous OKLCH path through the greens (olive → moss → forest → pine → jade). Each stage and each layer cycle samples its own grade, with a slow organic drift. It feeds CSS variables and Three.js lights and fog.
-- **Performance:** lazy scenes, shared geometries, instancing, merged fab-tool geometry, `?quality=low`, and a 2D fallback.
+- **Scenes are pure functions of the stage player's view** (`phaseId`, `phaseT`, `stageT`), so scrolling, playing and jumping always show a consistent state.
+- **The UI never re-renders per frame.** Captions and progress are written to the page from one animation loop or a 4 Hz timer; the 3D reads the engine inside `useFrame`.
+- **Detailed but cheap models:** each machine is built from code with the kit, merged into one draw call per finish and one shadow caster.
 
 ### Extending
 
-- **Add a stage:** add an entry to `data/process.ts` (phases, telemetry samplers, effect on the twin, facts, sources) and point it at a scene and variant.
-- **Add a scene:** create `components/3d/scenes/MyScene.tsx`, register it in `SCENE_LOADERS`, and add camera presets in `data/scenes.ts`.
-- **Assistant:** `lib/assistant` answers offline from the local knowledge base. `RemoteProvider` is a disabled stub, ready to wire to a model endpoint if wanted.
+- **Change the words:** edit `data/chapters.ts` (titles, one sentence, captions per phase) and `components/explore/parts.ts` (part cards).
+- **Add a scene:** create `components/3d/scenes/MyScene.tsx`, register it in `components/3d/sceneLoaders.ts`, and add camera presets in `data/scenes.ts`.
 
 ### Verification
 
-`npm run typecheck` and `npm run build` pass. Every stage was rendered headless (Chromium /
-SwiftShader) at mid-stage with its cued camera, with no console or page errors. The overlays,
-the 2D view and a 390 × 844 phone viewport were also checked.
+`npm run typecheck` and `npm run build` pass. The story and Explore were tested headless (Chromium /
+SwiftShader) on a 390 × 844 phone and a 1280 × 800 desktop: the landing view, three steps, opening
+Explore, changing step, looking inside, play / pause, tapping a part, taking the camera, and going back
+to the story, with no console or page errors.

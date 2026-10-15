@@ -1,0 +1,63 @@
+/*
+ * Design tokens for the clean redesign: one calm dark theme, one accent, one typeface.
+ * Every component uses these; nothing hard-codes its own colours, fonts or radii.
+ */
+:root {
+  /* surfaces */
+  --bg: #0a0d0c;
+  --surface: rgba(17, 21, 19, 0.94);
+  --surface-2: #161b18;
+  --surface-3: #1e2420;
+  --line: rgba(255, 255, 255, 0.08);
+  --line-2: rgba(255, 255, 255, 0.14);
+
+  /* text */
+  --text: #f1f4f1;
+  --text-2: #b3bcb5;
+  --text-3: #7d877f;
+
+  /* one accent */
+  --accent: #72d69f;
+  --accent-soft: rgba(114, 214, 159, 0.14);
+  --accent-ink: #08170f;
+
+  /* states (only where meaning needs colour) */
+  --good: #72d69f;
+  --bad: #f07a6a;
+
+  /* type: one family, a few sizes */
+  --font: 'Plus Jakarta Sans Variable', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --fs-display: clamp(2.25rem, 1.4rem + 4.2vw, 4.25rem);
+  --fs-title: clamp(1.5rem, 1.1rem + 1.8vw, 2.25rem);
+  --fs-lead: clamp(1.02rem, 0.96rem + 0.3vw, 1.18rem);
+  --fs-body: 1rem;
+  --fs-small: 0.875rem;
+  --fs-tiny: 0.75rem;
+  --lh-tight: 1.1;
+  --lh-body: 1.55;
+
+  /* shape and space */
+  --radius: 18px;
+  --radius-sm: 12px;
+  --radius-pill: 999px;
+  --gap: 16px;
+  --pad: clamp(16px, 4vw, 32px);
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  --top: 60px;
+
+  /* motion */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --t-fast: 160ms;
+  --t: 280ms;
+
+  /* phone safe areas */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --t-fast: 0ms;
+    --t: 0ms;
+  }
+}
